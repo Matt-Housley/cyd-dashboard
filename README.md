@@ -2,6 +2,21 @@
 
 A multi-screen information dashboard for the ESP32 Cheap Yellow Display (CYD), built with PlatformIO and LovyanGFX. Designed primarily for amateur radio operators, it also displays weather, news, and financial data.
 
+## Screenshots
+
+| | | |
+|:---:|:---:|:---:|
+| ![Clock](screenshots/Clock.jpg) | ![Weather](screenshots/Weather.jpg) | ![HF Conditions](screenshots/HFConditions.jpg) |
+| Clock | Weather | HF Conditions |
+| ![Propagation](screenshots/Propagation.jpg) | ![Grey Line](screenshots/GrayLine.jpg) | ![PSK Reporter](screenshots/PSKReporter.jpg) |
+| Propagation | Grey Line | PSK Reporter |
+| ![DX Spots](screenshots/DXSpots.jpg) | ![POTA Spots](screenshots/POTASpots.jpg) | ![SOTA Spots](screenshots/SOTASpots.jpg) |
+| DX Spots | POTA Spots | SOTA Spots |
+| ![Contests](screenshots/Contests.jpg) | ![BBC News](screenshots/BBCNews.jpg) | ![Apple News](screenshots/AppleNews.jpg) |
+| Contests | BBC News | Apple/Tech News |
+| ![Tracker](screenshots/Tracker.jpg) | | |
+| Tracker | | |
+
 ## Screens
 
 The dashboard cycles through 13 screens, each auto-refreshing on its own schedule:
