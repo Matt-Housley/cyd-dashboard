@@ -1,0 +1,156 @@
+CYD Dashboard — Version History
+================================
+
+1.15.005  2026-06-29
+  [Fix] Propagation screen columns now use three equal-width zones
+        with 8px margins and centred Day/Night text. Eliminates the
+        large gap between Day and Night and balances left/right margins.
+
+1.15.004  2026-06-29
+  [Fix] Contest exchange word-wrap now uses the actual word-break
+        positions to calculate the box height, so wrapped lines stay
+        inside the panel border.
+
+1.15.003  2026-06-29
+  [Fix] All four status bar icons now use a uniform 16×10px bounding
+        box with consistent 6px gaps. Icons vertically centred within
+        the bar (3px top/bottom margin).
+
+1.15.002  2026-06-29
+  [Fix] Replaced settings cog icon with a hamburger menu (three
+        horizontal bars) — cleaner at 16px scale.
+
+1.15.001  2026-06-29
+  [Fix] Even 6px gap between all status bar buttons (play/pause,
+        advance, wifi, settings cog). Previously 2px between the
+        rightmost three.
+
+1.15.000  2026-06-29
+  [Feature] Redesigned status bar layout. Left: screen counter + name.
+            Centre: time. Right: play/pause button, advance (>>)
+            button, WiFi signal bars, settings cog icon. Each button
+            has its own tap zone. Content area taps no longer advance
+            the screen — use the >> button or swipe instead.
+
+1.14.004  2026-06-29
+  [Fix] Contest detail exchange field now word-wraps onto multiple
+        lines when too long to fit on a single line. The overlay panel
+        height adjusts automatically.
+
+1.14.003  2026-06-29
+  [Fix] Contest detail fetch failures now show "Could not load details"
+        in a red-bordered overlay instead of showing "Loading..." forever.
+        Handles missing ref, HTTP failure, and empty responses.
+
+1.14.002  2026-06-29
+  [Fix] Reverted touch offset_rotation to 0 (correct for CYD28
+        hardware wiring). calibrateTouch() handles axis mapping
+        through the 4-point calibration data automatically.
+
+1.14.001  2026-06-29
+  [Fix] Touch offset_rotation changed to 6 (origin top-left, matching
+        display rotation 1) so calibration maps axes correctly without
+        manual inversion. Calibration now clears stale data before
+        running so crosshairs use the correct coordinate system.
+
+1.14.000  2026-06-29
+  [Feature] All "Fetching..." and "Loading..." messages now animate
+            with cycling dots (0-3 dots every 400ms) instead of static
+            text. Applies to drawLoader() used by all screens, the PSK
+            Reporter waiting message, and the contest detail overlay.
+
+1.13.001  2026-06-29
+  [Fix] Removed manual X-axis inversion in touch handler — the
+        calibration data now handles axis mapping correctly.
+
+1.13.000  2026-06-29
+  [Feature] Touch screen calibration in Settings. Uses LovyanGFX's
+            4-point crosshair calibration. Results are saved to SPIFFS
+            and applied automatically on boot.
+
+1.12.005  2026-06-29
+  [Fix] Auto-play now fully pauses while contest detail overlay is
+        visible, and resets the cycle timer when dismissed so the user
+        has time to tap another contest. Animated "Loading..." dots
+        replace the static text while fetching contest details.
+
+1.12.004  2026-06-29
+  [Fix] Auto-play cycle timer now resets on finger-down so the screen
+        can't advance between touch-down and touch-up. Fixes contest
+        detail overlay being lost when auto-play cycles during the tap.
+
+1.12.003  2026-06-29
+  [Fix] Disabled brownout detector at boot — WiFi radio initialisation
+        draws ~300 mA which can trigger false brownout resets on USB-
+        powered CYD boards. Also added 500ms stabilisation delay before
+        WiFi and reduced TX power to 8.5 dBm during initial connection.
+
+1.12.002  2026-06-29
+  [Fix] Increased Arduino loop task stack from 8192 to 12288 bytes to
+        fix crash during WiFiManager autoConnect. The additional static
+        RAM from new features reduced stack headroom below what
+        WiFiManager needs.
+
+1.12.001  2026-06-29
+  [Fix] Reduced static RAM usage to fix reboot loop: Contest link field
+        replaced with compact ref param (80→16 bytes × 24 copies),
+        polygon buffers trimmed (400→370), ContestDetail fields shrunk.
+        Saved ~1.8 KB static RAM.
+
+1.12.000  2026-06-29
+  [Feature] Version number displayed in bottom-left corner of splash
+            screen on startup.
+
+1.11.000  2026-06-29
+  [Feature] Contest detail overlay — tap a contest to fetch and display
+            mode, bands, and exchange from contestcalendar.com.
+
+1.10.000  2026-06-29
+  [Feature] Mode filter for DX Spots, POTA Spots, and SOTA Spots.
+            Settings > Mode Filter lets you toggle CW, Voice, FT8, FT4,
+            Digital (RTTY/PSK), and Other on/off. Persisted to flash.
+
+1.09.000  2026-06-29
+  [Feature] Correct map aspect ratio when zooming on PSK Reporter screen.
+            Expands the narrower axis to match the screen's pixel ratio
+            so landmasses are not distorted.
+
+1.08.000  2026-06-29
+  [Feature] Polygon edge clipping — coastline edges no longer bleed into
+            the status bar when zoomed.
+
+1.07.000  2026-06-29
+  [Feature] Higher-resolution coastlines generated from Natural Earth 50m
+            data at half-degree resolution (~31 polygons, 11 KB flash).
+            Zoomed maps now show much smoother outlines.
+
+1.06.000  2026-06-29
+  [Feature] Auto-zoom PSK Reporter map to fit QTH plus all receiver
+            spots. Full world view when no spots are present.
+
+1.05.000  2026-06-29
+  [Feature] Distance units changed from kilometres to miles on PSK
+            Reporter screen (bottom label and info overlay).
+
+1.04.000  2026-06-29
+  [Feature] Furthest station callsign, band, and distance displayed at
+            bottom-left of PSK Reporter screen, aligned with callsign.
+
+1.03.000  2026-06-29
+  [Feature] Country name shown in PSK Reporter tap overlay, derived from
+            callsign prefix lookup (shared with DX Spots screen).
+
+1.02.000  2026-06-29
+  [Feature] Tap-to-inspect on PSK Reporter — tap the pulsing furthest
+            (orange) or loudest (green) spot to see callsign, grid,
+            band, SNR, distance, and FURTHEST/LOUDEST label. Tap again
+            to dismiss.
+
+1.01.000  2026-06-29
+  [Feature] "PSK Reporter unavailable" message when fetch fails, instead
+            of showing "Fetching PSK Reporter..." indefinitely.
+
+1.00.000  2026-06-29
+  [Feature] Animated pulsing rings on PSK Reporter screen highlighting
+            the furthest spot (orange) and loudest/highest-SNR spot
+            (green). Haversine distance calculation added.

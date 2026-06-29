@@ -1,0 +1,14 @@
+# Custom partition table for CYD Dashboard — 4 MB flash
+#
+# No OTA (saves 1.875 MB vs min_spiffs.csv's two 1.875 MB OTA slots).
+# The freed space is given to SPIFFS so TTS MP3 files fit comfortably.
+#
+#   app0:   1.875 MB  (0x1F0000) — fits the ~1.4 MB firmware binary
+#   spiffs: 2.000 MB  (0x200000) — fits 96 × ~12 KB TTS files (≈1.1 MB)
+#
+# Total: 0x10000 + 0x1F0000 + 0x200000 = 0x400000 = exactly 4 MB
+#
+# Name,   Type, SubType, Offset,  Size,     Flags
+nvs,      data, nvs,     0x9000,  0x5000,
+app0,     app,  factory, 0x10000, 0x1F0000,
+spiffs,   data, spiffs,  0x200000,0x200000,

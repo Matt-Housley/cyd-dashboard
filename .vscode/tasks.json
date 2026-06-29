@@ -1,0 +1,18 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "PlatformIO: Upload File System",
+            "type": "shell",
+            "command": "${userHome}/.platformio/penv/bin/pio",
+            "args": ["run", "--target", "uploadfs", "--environment", "esp32dev"],
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "focus": false
+            },
+            "problemMatcher": []
+        }
+    ]
+}

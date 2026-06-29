@@ -1,0 +1,89 @@
+// Minimal std::span polyfill for GCC 8 (Xtensa ESP32 toolchain).
+// GCC 8's libstdc++ predates C++20 so <span> doesn't exist; this file is
+// found first because the project include/ dir is on the compiler search path.
+// It provides everything used by ESP32-audioI2S's psram_unique_ptr.hpp.
+#pragma once
+#include <cstddef>
+#include <iterator>
+#include <array>
+#include <type_traits>
+
+namespace std {
+
+inline constexpr size_t dynamic_extent = static_cast<size_t>(-1);
+
+template<typename T, size_t Extent = dynamic_extent>
+class span {
+public:
+    using element_type     = T;
+    using value_type       = typename remove_cv<T>::type;
+    using size_type        = size_t;
+    using difference_type  = ptrdiff_t;
+    using pointer          = T*;
+    using const_pointer    = const T*;
+    using reference        = T&;
+    using const_reference  = const T&;
+    using iterator         = T*;
+    using reverse_iterator = std::reverse_iterator<iterator>;
+
+    static constexpr size_t extent = Extent;
+
+    constexpr span() noexcept : _data(nullptr), _size(0) {}
+    constexpr span(pointer ptr, size_type count) noexcept : _data(ptr), _size(count) {}
+    constexpr span(pointer first, pointer last)  noexcept : _data(first), _size(static_cast<size_type>(last - first)) {}
+
+    template<size_t N>
+    constexpr span(T (&arr)[N]) noexcept : _data(arr), _size(N) {}
+
+    template<size_t N>
+    constexpr span(std::array<value_type, N>& arr) noexcept : _data(arr.data()), _size(N) {}
+
+    template<size_t N>
+    constexpr span(const std::array<value_type, N>& arr) noexcept : _data(arr.data()), _size(N) {}
+
+    constexpr pointer   data()  const noexcept { return _data; }
+    constexpr size_type size()  const noexcept { return _size; }
+    constexpr bool      empty() const noexcept { return _size == 0; }
+    constexpr size_type size_bytes() const noexcept { return _size * sizeof(T); }
+
+    constexpr reference operator[](size_type i) const { return _data[i]; }
+    constexpr reference front() const { return _data[0]; }
+    constexpr reference back()  const { return _data[_size - 1]; }
+
+    constexpr iterator begin()  const noexcept { return _data; }
+    constexpr iterator end()    const noexcept { return _data + _size; }
+    constexpr reverse_iterator rbegin() const noexcept { return reverse_iterator(end()); }
+    constexpr reverse_iterator rend()   const noexcept { return reverse_iterator(begin()); }
+
+    constexpr span first(size_type n) const noexcept { return {_data, n}; }
+    constexpr span last (size_type n) const noexcept { return {_data + _size - n, n}; }
+    constexpr span subspan(size_type offset,
+                           size_type count = dynamic_extent) const noexcept {
+        return {_data + offset, count == dynamic_extent ? _size - offset : count};
+    }
+
+private:
+    pointer   _data;
+    size_type _size;
+};
+
+// Deduction guides (C++17)
+template<typename T>           span(T*, size_t)          -> span<T>;
+template<typename T, size_t N> span(T(&)[N])             -> span<T, N>;
+template<typename T, size_t N> span(std::array<T,N>&)    -> span<T, N>;
+template<typename T, size_t N> span(const std::array<T,N>&) -> span<const T, N>;
+
+template<typename T, size_t N>
+inline span<const uint8_t>
+as_bytes(span<T, N> s) noexcept {
+    return {reinterpret_cast<const uint8_t*>(s.data()), s.size_bytes()};
+}
+
+template<typename T, size_t N,
+         typename = typename enable_if<!is_const<T>::value>::type>
+inline span<uint8_t>
+as_writable_bytes(span<T, N> s) noexcept {
+    return {reinterpret_cast<uint8_t*>(s.data()), s.size_bytes()};
+}
+
+} // namespace std
