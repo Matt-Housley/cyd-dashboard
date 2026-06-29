@@ -14,8 +14,8 @@ A multi-screen information dashboard for the ESP32 Cheap Yellow Display (CYD), b
 | DX Spots | POTA Spots | SOTA Spots |
 | ![Contests](screenshots/Contests.jpg) | ![BBC News](screenshots/BBCNews.jpg) | ![Apple News](screenshots/AppleNews.jpg) |
 | Contests | BBC News | Apple/Tech News |
-| ![Tracker](screenshots/Tracker.jpg) | | |
-| Tracker | | |
+| ![Tracker](screenshots/Tracker.jpg) | &nbsp; | &nbsp; |
+| Tracker | &nbsp; | &nbsp; |
 
 ## Screens
 
