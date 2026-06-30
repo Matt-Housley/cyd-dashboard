@@ -1969,7 +1969,34 @@ void fetchTzLookup() {
              "?latitude=%.4f&longitude=%.4f&current=temperature_2m&timezone=auto",
              lat, lon);
     Serial.printf("[tz-lookup] fetching %s\n", url);
-    String body = httpGet(url, 2048);
+
+    // Open-Meteo always responds with chunked Transfer-Encoding, so this can't
+    // use the shared httpGet() helper (its streamReadText() assumes
+    // Content-Length framing and would corrupt the body with raw chunk-size
+    // headers). http.getString() de-chunks automatically — same approach as
+    // fetchWeather() below.
+    String body;
+    {
+        if (!ensureWiFi()) { setResult(true, -1); return; }
+        sslCtxRelease();
+        {
+            WiFiClientSecure sc;
+            sslDataRelease();
+            sc.setInsecure();
+            {
+                HTTPClient http;
+                http.begin(sc, url);
+                http.setTimeout(20000);
+                http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+                http.addHeader("User-Agent", "CYD-Dashboard/1.0 ESP32");
+                http.addHeader("Connection", "close");
+                int code = http.GET();
+                if (code == HTTP_CODE_OK) body = http.getString();
+                http.end();
+            }
+        }
+        sslAllReclaim();
+    }
     if (body.isEmpty()) { Serial.println("[tz-lookup] fetch failed"); setResult(true, -1); return; }
 
     JsonDocument doc;

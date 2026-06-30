@@ -1,6 +1,15 @@
 CYD Dashboard — Version History
 ================================
 
+1.16.002  2026-06-30
+  [Fix] Timezone auto-detect lookup was reading Open-Meteo's response
+        through the shared httpGet() helper, which assumes
+        Content-Length framing. Open-Meteo always replies with chunked
+        Transfer-Encoding, so the JSON body was being corrupted by raw
+        chunk-size headers and every lookup failed with "Could not
+        detect timezone." Now uses http.getString() (chunk-aware),
+        matching the pattern already used by fetchWeather().
+
 1.16.001  2026-06-30
   [Fix] Saving a new grid locator now immediately resets the Weather
         screen to its boot-up "Fetching..." state instead of showing
