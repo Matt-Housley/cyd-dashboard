@@ -2,6 +2,8 @@
 
 A multi-screen information dashboard for the ESP32 Cheap Yellow Display (CYD), built with PlatformIO and LovyanGFX. Designed primarily for amateur radio operators, it also displays weather, news, and financial data.
 
+See [History.txt](History.txt) for the full version history and changelog.
+
 ## Screenshots
 
 | | | |
@@ -43,16 +45,30 @@ The dashboard cycles through 13 screens, each auto-refreshing on its own schedul
 - **Flash:** 4 MB (custom partition: 1.875 MB app + 2 MB SPIFFS, no OTA)
 - **Power:** USB — the board draws up to ~400 mA during WiFi transmit
 
+## Status Bar
+
+The status bar sits at the top of every screen:
+
+- **Left** — current screen number/total and name, e.g. `3/13 HF Conditions`
+- **Centre** — local time (`HH:MM`)
+- **Right** — four tap targets, evenly spaced:
+  - ⏯ **Play/Pause** — toggle auto-advance
+  - **▸▸ Advance** — jump to the next enabled screen immediately
+  - **WiFi bars** — signal strength (0-4 bars; tap has no action)
+  - **☰ Menu** — open on-device Settings
+
 ## Features
 
-- **Touch navigation** — swipe left/right to change screens, tap status bar for settings
-- **Auto-play** — screens cycle automatically (8 seconds each); tap the play/pause icon to stop
-- **Settings** — on-device configuration for QTH grid locator, timezone, screen visibility, stock ticker, callsign, and mode filters
-- **PSK Reporter** — animated pulsing markers for your furthest and loudest reception spots, with tap-to-inspect detail overlay showing callsign, country, grid, band, SNR, and distance
-- **Auto-zoom map** — PSK Reporter map zooms to fit your QTH and all receiver spots with correct aspect ratio
-- **Mode filter** — filter DX, POTA, and SOTA spots by mode (CW, Voice, FT8, FT4, Digital, Other)
-- **Contest detail** — tap any contest to fetch mode, bands, and exchange requirements from contestcalendar.com
+- **Touch navigation** — swipe left/right to change screens, or use the status bar buttons (auto-advance no longer triggers on a content-area tap, so screens like PSK Reporter and Contests can use taps for their own interactions)
+- **Auto-play** — screens cycle automatically (8 seconds each, 16s on the Clock); toggle with the play/pause button
+- **Touch calibration** — Settings > Touch Calibrate runs a 4-point crosshair calibration (powered by LovyanGFX) and persists the result to flash
+- **Automatic timezone detection** — saving a new grid locator in Settings > Location triggers a background lookup (via Open-Meteo's timezone resolver) that matches your coordinates to the correct timezone and applies it automatically; falls back to a manual prompt if no match is found
+- **Live location updates** — changing the grid locator immediately resets the Weather screen to its loading state and forces a fresh fetch for the new coordinates, rather than showing stale data for the old location
+- **PSK Reporter** — animated pulsing markers for your furthest and loudest reception spots, with a tap-to-inspect overlay showing callsign, country, grid, band, SNR, and distance; the map auto-zooms to fit your QTH and all current spots while preserving correct aspect ratio (letterboxed if needed)
+- **Mode filter** — filter DX, POTA, and SOTA spots by mode (CW, Voice, FT8, FT4, Digital, Other) from Settings > Mode Filter
+- **Contest detail** — tap any contest to fetch mode, bands, and exchange requirements from contestcalendar.com, with word-wrapping for long exchange formats and a clear error state if the lookup fails
 - **High-resolution coastlines** — world map uses Natural Earth 50m data at half-degree resolution
+- **Animated loading states** — "Fetching..." / "Loading..." messages animate with cycling dots instead of sitting static, and failed fetches (PSK Reporter, contest details) show an explicit error rather than spinning forever
 - **WiFi credentials** — configure via captive portal on first boot, or place `data/wifi.txt` (SSID on line 1, password on line 2)
 - **Efficient memory management** — SSL buffers are pre-reserved and released around each HTTPS call to avoid heap fragmentation on the ESP32's 320 KB DRAM
 
@@ -85,14 +101,15 @@ Alternatively, create `data/wifi.txt` with your SSID on line 1 and password on l
 
 ### Configuration
 
-Long-press anywhere on the status bar to open on-device settings:
+Tap the ☰ menu icon at the right of the status bar to open on-device settings:
 
-- **Location** — 6-character Maidenhead grid locator (used for distance calculations and map position)
-- **Timezone** — select from 22 common timezones
+- **Location** — 6-character Maidenhead grid locator (used for distance calculations, map position, and weather). Saving a new grid automatically detects and applies the correct timezone.
+- **Timezone** — select from 22 common timezones, or let Location auto-detect it for you
 - **Screens** — enable/disable individual screens
 - **Tracker** — choose stock/crypto symbol and chart range (1-5 years)
 - **Callsign** — your amateur radio callsign (used for PSK Reporter)
-- **Mode Filter** — toggle CW, Voice, FT8, FT4, Digital, and Other modes for spot screens
+- **Mode Filter** — toggle CW, Voice, FT8, FT4, Digital, and Other modes for the DX/POTA/SOTA spot screens
+- **Touch Calibrate** — run if touches don't line up with what's displayed
 
 ## Project Structure
 
@@ -118,7 +135,7 @@ data/
 
 All data is fetched from free, public APIs with no API keys required:
 
-- **Weather:** [Open-Meteo](https://open-meteo.com/)
+- **Weather & timezone lookup:** [Open-Meteo](https://open-meteo.com/)
 - **Solar/HF:** [HamQSL](https://www.hamqsl.com/)
 - **ISS position:** [Open Notify](http://open-notify.org/)
 - **DX Spots:** [DXLite by G7VJR](http://dxlite.g7vjr.org/)
