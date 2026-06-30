@@ -3,9 +3,9 @@
 
 // ─── Version ─────────────────────────────────────────────────────────────────
 #define VERSION_MAJOR  1
-#define VERSION_MINOR  15
-#define VERSION_PATCH  5
-#define VERSION_STR    "1.15.005"
+#define VERSION_MINOR  16
+#define VERSION_PATCH  1
+#define VERSION_STR    "1.16.001"
 
 // ─── Display ──────────────────────────────────────────────────────────────────
 #define SCREEN_W  320

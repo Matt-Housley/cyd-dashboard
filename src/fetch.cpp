@@ -1942,6 +1942,49 @@ void fetchContestDetail() {
     Serial.printf("[cx-detail] OK  mode=%s  bands=%s\n", d.mode, d.bands);
 }
 
+// ─── Timezone auto-detect ─────────────────────────────────────────────────────
+// Reuses Open-Meteo's timezone=auto resolver (the same API used for weather)
+// to find the IANA zone name for a lat/lon, then matches it against TZ_LIST.
+void fetchTzLookup() {
+    if (!g_tzLookupReq) return;
+    g_tzLookupReq = false;
+    float lat = g_tzLookupLat, lon = g_tzLookupLon;
+
+    auto setResult = [&](bool failed, int idx) {
+        TzLookupResult r;
+        r.valid  = true;
+        r.failed = failed;
+        if (!failed) {
+            strlcpy(r.tzName,  TZ_LIST[idx].name,  sizeof(r.tzName));
+            strlcpy(r.tzPosix, TZ_LIST[idx].posix, sizeof(r.tzPosix));
+        }
+        xSemaphoreTake(g_dataMutex, portMAX_DELAY);
+        g_tzLookup = r;
+        xSemaphoreGive(g_dataMutex);
+    };
+
+    char url[160];
+    snprintf(url, sizeof(url),
+             "https://api.open-meteo.com/v1/forecast"
+             "?latitude=%.4f&longitude=%.4f&current=temperature_2m&timezone=auto",
+             lat, lon);
+    Serial.printf("[tz-lookup] fetching %s\n", url);
+    String body = httpGet(url, 2048);
+    if (body.isEmpty()) { Serial.println("[tz-lookup] fetch failed"); setResult(true, -1); return; }
+
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, body);
+    if (err) { Serial.printf("[tz-lookup] JSON: %s\n", err.c_str()); setResult(true, -1); return; }
+
+    const char* iana = doc["timezone"] | "";
+    Serial.printf("[tz-lookup] iana=%s\n", iana);
+    int idx = tzFindByIana(iana);
+    if (idx < 0) { Serial.println("[tz-lookup] no match"); setResult(true, -1); return; }
+
+    Serial.printf("[tz-lookup] matched %s\n", TZ_LIST[idx].name);
+    setResult(false, idx);
+}
+
 // ─── PSK Reporter ─────────────────────────────────────────────────────────────
 // Fetches who received our callsign in the last 15 minutes from pskreporter.info.
 // XML is streamed into a String (≤32 KB) then parsed tag-by-tag with strstr().
@@ -2203,6 +2246,9 @@ void fetchTask(void* param) {
         }
         if (g_contestDetailReq >= 0) {
             fetchContestDetail();
+        }
+        if (g_tzLookupReq) {
+            fetchTzLookup();
         }
         vTaskDelay(pdMS_TO_TICKS(5000));
     }

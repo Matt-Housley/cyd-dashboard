@@ -32,6 +32,10 @@ SOTASpotsData     g_sotaSpots;
 ContestData       g_contests;
 ContestDetail     g_contestDetail = {};
 volatile int8_t   g_contestDetailReq = -1;
+TzLookupResult    g_tzLookup = {};
+volatile bool     g_tzLookupReq = false;
+volatile float    g_tzLookupLat = 0.0f;
+volatile float    g_tzLookupLon = 0.0f;
 SemaphoreHandle_t g_dataMutex;
 
 // ─── SSL pre-reserves (declared in fetch.h) ───────────────────────────────────

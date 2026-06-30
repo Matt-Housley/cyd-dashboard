@@ -9,8 +9,13 @@
 struct TzEntry {
     const char* name;    // human-readable
     const char* posix;   // POSIX TZ string for setenv("TZ",...)
+    const char* iana;    // primary IANA zone name for auto-detect matching
 };
 extern const TzEntry TZ_LIST[TZ_COUNT];
+
+// Match an IANA zone name (as returned by Open-Meteo) to a TZ_LIST entry.
+// Returns -1 if no match found.
+int tzFindByIana(const char* iana);
 
 // ─── Stock symbol presets ─────────────────────────────────────────────────────
 #define SYM_COUNT 8

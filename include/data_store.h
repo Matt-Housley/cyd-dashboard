@@ -199,6 +199,19 @@ struct ContestDetail {
 extern ContestDetail    g_contestDetail;
 extern volatile int8_t  g_contestDetailReq;
 
+// ─── Timezone auto-detect (looked up from Open-Meteo on location save) ───────
+struct TzLookupResult {
+    bool  valid  = false;   // result ready (success or failure)
+    bool  failed = false;   // true = lookup failed or no match found
+    char  tzName[32] = "";  // matched TZ_LIST human-readable name
+    char  tzPosix[48] = ""; // matched TZ_LIST POSIX string
+};
+
+extern TzLookupResult   g_tzLookup;
+extern volatile bool    g_tzLookupReq;   // true = lookup requested
+extern volatile float   g_tzLookupLat;
+extern volatile float   g_tzLookupLon;
+
 // ─── Globals (defined in main.cpp) ───────────────────────────────────────────
 extern WeatherData      g_weather;
 extern SolarData        g_solar;

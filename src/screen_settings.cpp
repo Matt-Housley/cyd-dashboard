@@ -2,6 +2,7 @@
 #include "settings.h"
 #include "ui_common.h"
 #include "config.h"
+#include "data_store.h"
 #include <cstring>
 #include "fonts/ui_fonts.h"
 
@@ -15,6 +16,7 @@ enum SettingsPage : uint8_t {
     PAGE_CALLSIGN,
     PAGE_MODES,
     PAGE_CALIBRATE,
+    PAGE_TZ_DETECT,
 };
 
 static SettingsPage g_page        = PAGE_MENU;
@@ -22,6 +24,7 @@ static int          g_tzScroll    = 0;      // timezone list first-visible row
 static int          g_scrScroll   = 0;      // screens list first-visible row
 static char         g_editGrid[8];          // working copy for location editor
 static char         g_editCall[14];         // working copy for callsign editor
+static bool         g_tzApplied   = false;  // true once an arrived tz-lookup result has been saved
 
 // ─── Shared layout constants ──────────────────────────────────────────────────
 static const int HDR_Y    = CONTENT_Y;      // 16
@@ -441,6 +444,61 @@ static void runCalibration() {
     g_page = PAGE_MENU;
 }
 
+// ─── PAGE_TZ_DETECT ───────────────────────────────────────────────────────────
+static void drawTzDetect() {
+    drawSubHeader("TIMEZONE");
+
+    xSemaphoreTake(g_dataMutex, portMAX_DELAY);
+    TzLookupResult r = g_tzLookup;
+    xSemaphoreGive(g_dataMutex);
+
+    const int cy = BODY_Y + (SCREEN_H - BODY_Y) / 2 - 8;
+
+    if (!r.valid) {
+        char msg[28];
+        int dots = (millis() / 400) % 4;
+        snprintf(msg, sizeof(msg), "Detecting timezone%.*s", dots, "...");
+        spr.setFont(UI_FONT_12);
+        spr.setTextColor(C(COL_AMBER));
+        int fullW = spr.textWidth("Detecting timezone...");
+        spr.setCursor((SCREEN_W - fullW) / 2, cy);
+        spr.print(msg);
+    } else if (r.failed) {
+        spr.setFont(UI_FONT_12);
+        spr.setTextColor(C(COL_RED));
+        const char* msg = "Could not detect timezone";
+        int mw = spr.textWidth(msg);
+        spr.setCursor((SCREEN_W - mw) / 2, cy - 10);
+        spr.print(msg);
+
+        spr.setFont(UI_FONT_9);
+        spr.setTextColor(C(COL_GREY));
+        const char* hint = "Set it manually, or tap to continue";
+        int hw = spr.textWidth(hint);
+        spr.setCursor((SCREEN_W - hw) / 2, cy + 14);
+        spr.print(hint);
+    } else {
+        if (!g_tzApplied) {
+            strlcpy(g_settings.tz,     r.tzPosix, sizeof(g_settings.tz));
+            strlcpy(g_settings.tzName, r.tzName,  sizeof(g_settings.tzName));
+            settingsSave();
+            g_tzApplied = true;
+        }
+
+        spr.setFont(UI_FONT_12);
+        spr.setTextColor(C(COL_GREEN));
+        const char* msg = "Timezone set:";
+        int mw = spr.textWidth(msg);
+        spr.setCursor((SCREEN_W - mw) / 2, cy - 10);
+        spr.print(msg);
+
+        spr.setTextColor(C(COL_WHITE));
+        int nw = spr.textWidth(r.tzName);
+        spr.setCursor((SCREEN_W - nw) / 2, cy + 10);
+        spr.print(r.tzName);
+    }
+}
+
 // ─── Public: draw ─────────────────────────────────────────────────────────────
 void drawScreenSettings() {
     if (g_page == PAGE_CALIBRATE) {
@@ -448,13 +506,14 @@ void drawScreenSettings() {
         return;
     }
     switch (g_page) {
-        case PAGE_MENU:      drawMenu();      break;
-        case PAGE_LOCATION:  drawLocation();  break;
-        case PAGE_TIMEZONE:  drawTimezone();  break;
-        case PAGE_SCREENS:   drawScreens();   break;
-        case PAGE_TRACKER:   drawTracker();   break;
-        case PAGE_CALLSIGN:  drawCallsign();  break;
-        case PAGE_MODES:     drawModes();     break;
+        case PAGE_MENU:       drawMenu();      break;
+        case PAGE_LOCATION:   drawLocation();  break;
+        case PAGE_TIMEZONE:   drawTimezone();  break;
+        case PAGE_SCREENS:    drawScreens();   break;
+        case PAGE_TRACKER:    drawTracker();   break;
+        case PAGE_CALLSIGN:   drawCallsign();  break;
+        case PAGE_MODES:      drawModes();     break;
+        case PAGE_TZ_DETECT:  drawTzDetect();  break;
         default: break;
     }
 }
@@ -555,7 +614,22 @@ bool settingsTouchUp(int32_t sx, int32_t sy,
                 strlcpy(g_settings.grid, g_editGrid, sizeof(g_settings.grid));
                 gridToLatLon(g_settings.grid, g_settings.lat, g_settings.lon);
                 settingsSave();
-                g_page = PAGE_MENU;
+
+                // Location changed — reset weather so the old location's data
+                // doesn't linger; the loader shows until the fresh fetch lands.
+                xSemaphoreTake(g_dataMutex, portMAX_DELAY);
+                g_weather.valid = false;
+                xSemaphoreGive(g_dataMutex);
+                g_forceFetchWeather = true;
+
+                // Kick off async timezone auto-detect from the new location
+                g_tzLookup.valid  = false;
+                g_tzLookup.failed = false;
+                g_tzLookupLat = g_settings.lat;
+                g_tzLookupLon = g_settings.lon;
+                g_tzLookupReq = true;
+                g_tzApplied   = false;
+                g_page = PAGE_TZ_DETECT;
                 break;
             }
             // ▲ row
@@ -567,6 +641,12 @@ bool settingsTouchUp(int32_t sx, int32_t sy,
                 cycleChar(g_editGrid, col, -1);
             }
         }
+        break;
+
+    // ── TZ AUTO-DETECT (result page) ────────────────────────────────────────────
+    case PAGE_TZ_DETECT:
+        if (!isTap) break;
+        if (g_tzLookup.valid) g_page = PAGE_MENU;   // tap anywhere to dismiss once ready
         break;
 
     // ── TIMEZONE ──────────────────────────────────────────────────────────────

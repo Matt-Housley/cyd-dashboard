@@ -13,6 +13,7 @@ void fetchPOTASpots();
 void fetchSOTASpots();
 void fetchContests();
 void fetchContestDetail();
+void fetchTzLookup();
 void fetchPSKReporter();
 
 // FreeRTOS task — pin to core 0

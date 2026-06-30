@@ -1,6 +1,23 @@
 CYD Dashboard — Version History
 ================================
 
+1.16.001  2026-06-30
+  [Fix] Saving a new grid locator now immediately resets the Weather
+        screen to its boot-up "Fetching..." state instead of showing
+        stale data for the old location, and forces an immediate
+        re-fetch for the new coordinates.
+
+1.16.000  2026-06-30
+  [Feature] Automatic timezone detection from grid locator. When you
+            save a new location in Settings > Location, the device
+            looks up the IANA timezone for those coordinates via
+            Open-Meteo (the same API used for weather) and matches it
+            against the built-in timezone list, applying it
+            automatically. Falls back to a manual prompt if no match
+            is found. Fixes reports of incorrect time/weather display
+            after only setting the grid locator (e.g. EM74sc showing
+            London time instead of US Eastern).
+
 1.15.005  2026-06-29
   [Fix] Propagation screen columns now use three equal-width zones
         with 8px margins and centred Day/Night text. Eliminates the

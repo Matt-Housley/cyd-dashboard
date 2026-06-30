@@ -9,29 +9,70 @@ volatile bool    g_forceFetchTracker = false;
 
 // ─── Timezone table ───────────────────────────────────────────────────────────
 const TzEntry TZ_LIST[TZ_COUNT] = {
-    { "London (GMT/BST)",       "GMT0BST,M3.5.0/1,M10.5.0"       },
-    { "Dublin (GMT/IST)",       "GMT0IST,M3.5.0/1,M10.5.0"       },
-    { "Lisbon (WET/WEST)",      "WET0WEST,M3.5.0/1,M10.5.0"      },
-    { "Paris (CET/CEST)",       "CET-1CEST,M3.5.0,M10.5.0/3"     },
-    { "Berlin (CET/CEST)",      "CET-1CEST,M3.5.0,M10.5.0/3"     },
-    { "Athens (EET/EEST)",      "EET-2EEST,M3.5.0/3,M10.5.0/4"   },
-    { "Moscow (MSK)",           "MSK-3"                           },
-    { "Dubai (GST)",            "GST-4"                           },
-    { "India (IST)",            "IST-5:30"                        },
-    { "Bangkok (ICT)",          "ICT-7"                           },
-    { "Singapore (SGT)",        "SGT-8"                           },
-    { "Tokyo (JST)",            "JST-9"                           },
-    { "Sydney (AEST/AEDT)",     "AEST-10AEDT,M10.1.0,M4.1.0/3"   },
-    { "Auckland (NZST/NZDT)",   "NZST-12NZDT,M9.5.0,M4.1.0/3"   },
-    { "UTC",                    "UTC0"                            },
-    { "New York (EST/EDT)",     "EST5EDT,M3.2.0,M11.1.0"         },
-    { "Chicago (CST/CDT)",      "CST6CDT,M3.2.0,M11.1.0"        },
-    { "Denver (MST/MDT)",       "MST7MDT,M3.2.0,M11.1.0"        },
-    { "Los Angeles (PST/PDT)",  "PST8PDT,M3.2.0,M11.1.0"        },
-    { "Anchorage (AKST/AKDT)", "AKST9AKDT,M3.2.0,M11.1.0"       },
-    { "Honolulu (HST)",         "HST10"                          },
-    { "Sao Paulo (BRT/BRST)",  "BRT3BRST,M10.3.0/0,M2.3.0/0"    },
+    { "London (GMT/BST)",       "GMT0BST,M3.5.0/1,M10.5.0",      "Europe/London"    },
+    { "Dublin (GMT/IST)",       "GMT0IST,M3.5.0/1,M10.5.0",      "Europe/Dublin"    },
+    { "Lisbon (WET/WEST)",      "WET0WEST,M3.5.0/1,M10.5.0",     "Europe/Lisbon"    },
+    { "Paris (CET/CEST)",       "CET-1CEST,M3.5.0,M10.5.0/3",    "Europe/Paris"     },
+    { "Berlin (CET/CEST)",      "CET-1CEST,M3.5.0,M10.5.0/3",    "Europe/Berlin"    },
+    { "Athens (EET/EEST)",      "EET-2EEST,M3.5.0/3,M10.5.0/4",  "Europe/Athens"    },
+    { "Moscow (MSK)",           "MSK-3",                          "Europe/Moscow"    },
+    { "Dubai (GST)",            "GST-4",                          "Asia/Dubai"       },
+    { "India (IST)",            "IST-5:30",                       "Asia/Kolkata"     },
+    { "Bangkok (ICT)",          "ICT-7",                          "Asia/Bangkok"     },
+    { "Singapore (SGT)",        "SGT-8",                          "Asia/Singapore"   },
+    { "Tokyo (JST)",            "JST-9",                          "Asia/Tokyo"       },
+    { "Sydney (AEST/AEDT)",     "AEST-10AEDT,M10.1.0,M4.1.0/3",  "Australia/Sydney" },
+    { "Auckland (NZST/NZDT)",   "NZST-12NZDT,M9.5.0,M4.1.0/3",  "Pacific/Auckland" },
+    { "UTC",                    "UTC0",                           "UTC"              },
+    { "New York (EST/EDT)",     "EST5EDT,M3.2.0,M11.1.0",        "America/New_York" },
+    { "Chicago (CST/CDT)",      "CST6CDT,M3.2.0,M11.1.0",        "America/Chicago"  },
+    { "Denver (MST/MDT)",       "MST7MDT,M3.2.0,M11.1.0",        "America/Denver"   },
+    { "Los Angeles (PST/PDT)",  "PST8PDT,M3.2.0,M11.1.0",        "America/Los_Angeles" },
+    { "Anchorage (AKST/AKDT)", "AKST9AKDT,M3.2.0,M11.1.0",      "America/Anchorage" },
+    { "Honolulu (HST)",         "HST10",                          "Pacific/Honolulu" },
+    { "Sao Paulo (BRT/BRST)",  "BRT3BRST,M10.3.0/0,M2.3.0/0",   "America/Sao_Paulo" },
 };
+
+// Aliases — IANA zones that share identical rules with a TZ_LIST entry but
+// have a different canonical name (common for nearby cities/regions).
+struct TzAlias { const char* iana; int tzIndex; };
+static const TzAlias TZ_ALIASES[] = {
+    { "Europe/Belfast",       0 },  { "Europe/Jersey",        0 },
+    { "Europe/Guernsey",      0 },  { "Europe/Isle_of_Man",   0 },
+    { "Europe/Madrid",        3 },  { "Europe/Amsterdam",     3 },
+    { "Europe/Brussels",      3 },  { "Europe/Rome",          3 },
+    { "Europe/Vienna",        3 },  { "Europe/Zurich",        3 },
+    { "Europe/Stockholm",     3 },  { "Europe/Oslo",          3 },
+    { "Europe/Copenhagen",    3 },  { "Europe/Warsaw",        3 },
+    { "Europe/Prague",        3 },  { "Europe/Budapest",      3 },
+    { "Europe/Helsinki",      5 },  { "Europe/Bucharest",     5 },
+    { "Europe/Kiev",          5 },  { "Europe/Sofia",         5 },
+    { "Asia/Kuwait",          7 },  { "Asia/Muscat",          7 },
+    { "Asia/Colombo",         8 },
+    { "Asia/Jakarta",        10 },
+    { "Asia/Kuala_Lumpur",   10 },  { "Asia/Manila",         10 },
+    { "Asia/Hong_Kong",      10 },  { "Asia/Shanghai",       10 },
+    { "Asia/Taipei",         10 },
+    { "Asia/Seoul",          11 },
+    { "Australia/Brisbane",  12 },  { "Australia/Melbourne", 12 },
+    { "America/Detroit",     15 },  { "America/Toronto",     15 },
+    { "America/Indianapolis",15 },  { "America/Nassau",      15 },
+    { "America/Indiana/Indianapolis", 15 },
+    { "America/Winnipeg",    16 },  { "America/Mexico_City", 16 },
+    { "America/Edmonton",    17 },  { "America/Boise",       17 },
+    { "America/Vancouver",   18 },  { "America/Tijuana",     18 },
+    { "America/Juneau",      19 },
+};
+static const int TZ_ALIAS_COUNT = sizeof(TZ_ALIASES) / sizeof(TZ_ALIASES[0]);
+
+int tzFindByIana(const char* iana) {
+    if (!iana || !iana[0]) return -1;
+    for (int i = 0; i < TZ_COUNT; i++)
+        if (strcmp(TZ_LIST[i].iana, iana) == 0) return i;
+    for (int i = 0; i < TZ_ALIAS_COUNT; i++)
+        if (strcmp(TZ_ALIASES[i].iana, iana) == 0) return TZ_ALIASES[i].tzIndex;
+    return -1;
+}
 
 // ─── Stock symbol table ───────────────────────────────────────────────────────
 const SymEntry SYM_LIST[SYM_COUNT] = {
