@@ -116,8 +116,11 @@ void drawScreenClock() {
         return;
     }
 
-    bool bst = (ti.tm_isdst > 0);
-    const char* zone = bst ? "BST" : "GMT";
+    // Zone abbreviation (e.g. "EDT", "BST", "JST") — derived from the active
+    // POSIX TZ string via the C library, so this works for any timezone the
+    // user selects or that gets auto-detected from the grid locator.
+    char zone[8];
+    strftime(zone, sizeof(zone), "%Z", &ti);
 
     int y = CONTENT_Y + 4;
 
@@ -266,10 +269,19 @@ void drawScreenClock() {
         ly += 26;
     }
 
-    // ── DST footnote ──────────────────────────────────────────────────────────
-    const char* note = bst
-        ? "British Summer Time  -  UTC+1"
-        : "Greenwich Mean Time  -  UTC+0";
+    // ── Timezone footnote ─────────────────────────────────────────────────────
+    // Built from the configured timezone name + the live UTC offset, so it's
+    // correct for whichever zone is selected (not just London).
+    bool negOff  = utcOffMin < 0;
+    int  absOff  = abs(utcOffMin);
+    int  offH    = absOff / 60;
+    int  offM    = absOff % 60;
+    char offBuf[10];
+    if (offM == 0) snprintf(offBuf, sizeof(offBuf), "UTC%s%d",     negOff ? "-" : "+", offH);
+    else           snprintf(offBuf, sizeof(offBuf), "UTC%s%d:%02d", negOff ? "-" : "+", offH, offM);
+
+    char note[48];
+    snprintf(note, sizeof(note), "%s  -  %s", g_settings.tzName, offBuf);
     spr.setFont(UI_FONT_9);
     spr.setTextColor(C(COL_GREY));
     int nw = spr.textWidth(note);

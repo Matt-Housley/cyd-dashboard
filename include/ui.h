@@ -11,3 +11,10 @@ void uiDraw(int screenID, bool autoPlay, bool paused, bool inSettings = false);
 
 // Status bar button X positions for touch hit-testing
 void getStatusBarLayout(int& playX, int& advX, int& cogX);
+
+// Live touch state — lets a screen's draw function react to an in-progress
+// touch (e.g. dragging a scrollbar thumb) rather than only the final tap/swipe
+// reported on finger-up.
+bool    touchIsActive();
+int32_t touchCurrentX();
+int32_t touchCurrentY();

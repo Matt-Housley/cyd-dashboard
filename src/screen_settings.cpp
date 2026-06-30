@@ -1,6 +1,7 @@
 #include "screen_settings.h"
 #include "settings.h"
 #include "ui_common.h"
+#include "ui.h"
 #include "config.h"
 #include "data_store.h"
 #include <cstring>
@@ -25,6 +26,26 @@ static int          g_scrScroll   = 0;      // screens list first-visible row
 static char         g_editGrid[8];          // working copy for location editor
 static char         g_editCall[14];         // working copy for callsign editor
 static bool         g_tzApplied   = false;  // true once an arrived tz-lookup result has been saved
+
+// ─── Timezone display order — alphabetical, decoupled from TZ_LIST's own
+// index order (which TZ_ALIASES and tzFindByIana() depend on staying fixed) ──
+static int  g_tzOrder[TZ_COUNT];
+static bool g_tzOrderReady = false;
+
+static void ensureTzOrder() {
+    if (g_tzOrderReady) return;
+    for (int i = 0; i < TZ_COUNT; i++) g_tzOrder[i] = i;
+    for (int i = 1; i < TZ_COUNT; i++) {
+        int key = g_tzOrder[i];
+        int j = i - 1;
+        while (j >= 0 && strcasecmp(TZ_LIST[g_tzOrder[j]].name, TZ_LIST[key].name) > 0) {
+            g_tzOrder[j + 1] = g_tzOrder[j];
+            j--;
+        }
+        g_tzOrder[j + 1] = key;
+    }
+    g_tzOrderReady = true;
+}
 
 // ─── Shared layout constants ──────────────────────────────────────────────────
 static const int HDR_Y    = CONTENT_Y;      // 16
@@ -177,19 +198,46 @@ static void drawLocation() {
 }
 
 // ─── PAGE_TIMEZONE ────────────────────────────────────────────────────────────
+static const int TZ_SB_W    = 22;                    // right-hand sidebar width
+static const int TZ_ARROW_H = 22;                    // up/down button height
+static const int TZ_LIST_W  = SCREEN_W - TZ_SB_W;     // row content width
+
 static void drawTimezone() {
     drawSubHeader("TIMEZONE");
+    ensureTzOrder();
 
     int y    = BODY_Y;
     int rows = (SCREEN_H - y) / TZ_ROW_H;
+    int maxScroll = max(0, TZ_COUNT - rows);
+    if (g_tzScroll > maxScroll) g_tzScroll = maxScroll;
+
+    // ── Live scrollbar interaction ─────────────────────────────────────────────
+    // Polled every frame (not just on finger-up) so dragging the thumb tracks
+    // the finger smoothly, and tapping anywhere in the track jumps straight to
+    // that position — both reported as "doing nothing" before this existed.
+    if (touchIsActive() && maxScroll > 0) {
+        int32_t tx = touchCurrentX();
+        int32_t ty = touchCurrentY();
+        if (tx >= SCREEN_W - TZ_SB_W) {
+            int trackY0 = BODY_Y + TZ_ARROW_H + 3;
+            int trackY1 = SCREEN_H - TZ_ARROW_H - 3;
+            if (ty >= trackY0 && ty <= trackY1 && trackY1 > trackY0) {
+                float frac = (float)(ty - trackY0) / (float)(trackY1 - trackY0);
+                if (frac < 0.0f) frac = 0.0f;
+                if (frac > 1.0f) frac = 1.0f;
+                g_tzScroll = (int)(frac * maxScroll + 0.5f);
+            }
+        }
+    }
 
     for (int vi = 0; vi < rows; vi++) {
-        int ti = g_tzScroll + vi;
-        if (ti >= TZ_COUNT) break;
+        int pos = g_tzScroll + vi;
+        if (pos >= TZ_COUNT) break;
+        int ti = g_tzOrder[pos];
         int ry = y + vi * TZ_ROW_H;
 
         bool sel = (strcmp(TZ_LIST[ti].posix, g_settings.tz) == 0);
-        if (sel) spr.fillRect(0, ry, SCREEN_W, TZ_ROW_H, C(0x0F1F0FUL));
+        if (sel) spr.fillRect(0, ry, TZ_LIST_W, TZ_ROW_H, C(0x0F1F0FUL));
 
         spr.fillCircle(10, ry + TZ_ROW_H / 2, 4,
                        C(sel ? COL_GREEN : COL_BORDER));
@@ -199,25 +247,50 @@ static void drawTimezone() {
         spr.setCursor(22, ry + 6);
         spr.print(TZ_LIST[ti].name);
 
-        spr.drawFastHLine(0, ry + TZ_ROW_H - 1, SCREEN_W, C(COL_BORDER));
+        spr.drawFastHLine(0, ry + TZ_ROW_H - 1, TZ_LIST_W, C(COL_BORDER));
     }
 
-    // Scroll hints
-    if (g_tzScroll > 0) {
-        spr.setFont(UI_FONT_9);
-        spr.setTextColor(C(COL_GREY));
-        spr.setCursor(SCREEN_W - 12, BODY_Y + 2);
-        spr.print("^");
+    // ── Right-hand sidebar: page-up arrow, scroll thumb, page-down arrow ──────
+    const int sbX  = SCREEN_W - TZ_SB_W;
+    const int upY  = BODY_Y;
+    const int dnY  = SCREEN_H - TZ_ARROW_H;
+    const int trackY0 = upY + TZ_ARROW_H + 3;
+    const int trackY1 = dnY - 3;
+    const int trackH   = max(1, trackY1 - trackY0);
+
+    spr.drawFastVLine(sbX, BODY_Y, SCREEN_H - BODY_Y, C(COL_BORDER));
+
+    // Up arrow
+    {
+        bool enabled = g_tzScroll > 0;
+        uint32_t col = enabled ? COL_GREY_L : COL_BORDER;
+        spr.drawRect(sbX, upY, TZ_SB_W, TZ_ARROW_H, C(COL_BORDER));
+        int acx = sbX + TZ_SB_W / 2;
+        spr.fillTriangle(acx - 5, upY + 16, acx + 5, upY + 16, acx, upY + 6, C(col));
     }
-    if (g_tzScroll + rows < TZ_COUNT) {
-        spr.setFont(UI_FONT_9);
-        spr.setTextColor(C(COL_GREY));
-        spr.setCursor(SCREEN_W - 12, SCREEN_H - 12);
-        spr.print("v");
+    // Down arrow
+    {
+        bool enabled = g_tzScroll < maxScroll;
+        uint32_t col = enabled ? COL_GREY_L : COL_BORDER;
+        spr.drawRect(sbX, dnY, TZ_SB_W, TZ_ARROW_H, C(COL_BORDER));
+        int acx = sbX + TZ_SB_W / 2;
+        spr.fillTriangle(acx - 5, dnY + 6, acx + 5, dnY + 6, acx, dnY + 16, C(col));
+    }
+    // Track + thumb
+    {
+        int thumbH = max(12, trackH * rows / TZ_COUNT);
+        int avail  = trackH - thumbH;
+        int thumbY = trackY0 + (maxScroll > 0 ? avail * g_tzScroll / maxScroll : 0);
+        spr.fillRoundRect(sbX + 5, thumbY, TZ_SB_W - 10, thumbH, 2, C(COL_GREY));
     }
 }
 
 // ─── PAGE_SCREENS ─────────────────────────────────────────────────────────────
+static const int SCR_SB_W    = 22;                    // right-hand sidebar width
+static const int SCR_ARROW_H = 22;                     // up/down button height
+static const int SCR_LIST_W  = SCREEN_W - SCR_SB_W;    // row content width
+static const int SCR_BTN_X   = SCR_LIST_W - 58;        // ON/OFF button x
+
 static void drawScreens() {
     drawSubHeader("SCREENS");
 
@@ -228,14 +301,32 @@ static void drawScreens() {
         "BBC News", "Apple News", "Tracker"
     };
 
-    int visRows = (SCREEN_H - BODY_Y) / SCR_ROW_H;   // 8 rows visible at once
+    int visRows = (SCREEN_H - BODY_Y) / SCR_ROW_H;
+    int maxScroll = max(0, NUM_SCREENS - visRows);
+    if (g_scrScroll > maxScroll) g_scrScroll = maxScroll;
+
+    // ── Live scrollbar interaction (tap-to-jump + drag), same as Timezone ─────
+    if (touchIsActive() && maxScroll > 0) {
+        int32_t tx = touchCurrentX();
+        int32_t ty = touchCurrentY();
+        if (tx >= SCREEN_W - SCR_SB_W) {
+            int trackY0 = BODY_Y + SCR_ARROW_H + 3;
+            int trackY1 = SCREEN_H - SCR_ARROW_H - 3;
+            if (ty >= trackY0 && ty <= trackY1 && trackY1 > trackY0) {
+                float frac = (float)(ty - trackY0) / (float)(trackY1 - trackY0);
+                if (frac < 0.0f) frac = 0.0f;
+                if (frac > 1.0f) frac = 1.0f;
+                g_scrScroll = (int)(frac * maxScroll + 0.5f);
+            }
+        }
+    }
 
     for (int vi = 0; vi < visRows; vi++) {
         int si = g_scrScroll + vi;
         if (si >= NUM_SCREENS) break;
 
         int ry = BODY_Y + vi * SCR_ROW_H;
-        spr.drawFastHLine(0, ry, SCREEN_W, C(COL_BORDER));
+        spr.drawFastHLine(0, ry, SCR_LIST_W, C(COL_BORDER));
         spr.setFont(UI_FONT_9);
         // Screen number (dim) + name — makes it obvious the list is scrollable
         spr.setTextColor(C(COL_GREY));
@@ -249,27 +340,47 @@ static void drawScreens() {
         spr.print(names[si]);
 
         bool en = g_settings.screenEnabled[si];
-        drawBtn(SCREEN_W - 58, ry + 3, 52, 18,
+        drawBtn(SCR_BTN_X, ry + 3, 52, 18,
                 en ? 0x0A280AUL : 0x280A0AUL,
                 en ? COL_GREEN  : COL_RED,
                 en ? COL_GREEN  : COL_RED,
                 en ? "ON" : "OFF");
     }
     spr.drawFastHLine(0, BODY_Y + min(visRows, NUM_SCREENS) * SCR_ROW_H,
-                      SCREEN_W, C(COL_BORDER));
+                      SCR_LIST_W, C(COL_BORDER));
 
-    // Scroll hints
-    if (g_scrScroll > 0) {
-        spr.setFont(UI_FONT_9);
-        spr.setTextColor(C(COL_GREY));
-        spr.setCursor(SCREEN_W - 12, BODY_Y + 2);
-        spr.print("^");
+    // ── Right-hand sidebar: page-up arrow, scroll thumb, page-down arrow ──────
+    const int sbX  = SCREEN_W - SCR_SB_W;
+    const int upY  = BODY_Y;
+    const int dnY  = SCREEN_H - SCR_ARROW_H;
+    const int trackY0 = upY + SCR_ARROW_H + 3;
+    const int trackY1 = dnY - 3;
+    const int trackH   = max(1, trackY1 - trackY0);
+
+    spr.drawFastVLine(sbX, BODY_Y, SCREEN_H - BODY_Y, C(COL_BORDER));
+
+    // Up arrow
+    {
+        bool enabled = g_scrScroll > 0;
+        uint32_t col = enabled ? COL_GREY_L : COL_BORDER;
+        spr.drawRect(sbX, upY, SCR_SB_W, SCR_ARROW_H, C(COL_BORDER));
+        int acx = sbX + SCR_SB_W / 2;
+        spr.fillTriangle(acx - 5, upY + 16, acx + 5, upY + 16, acx, upY + 6, C(col));
     }
-    if (g_scrScroll + visRows < NUM_SCREENS) {
-        spr.setFont(UI_FONT_9);
-        spr.setTextColor(C(COL_GREY));
-        spr.setCursor(SCREEN_W - 12, SCREEN_H - 12);
-        spr.print("v");
+    // Down arrow
+    {
+        bool enabled = g_scrScroll < maxScroll;
+        uint32_t col = enabled ? COL_GREY_L : COL_BORDER;
+        spr.drawRect(sbX, dnY, SCR_SB_W, SCR_ARROW_H, C(COL_BORDER));
+        int acx = sbX + SCR_SB_W / 2;
+        spr.fillTriangle(acx - 5, dnY + 6, acx + 5, dnY + 6, acx, dnY + 16, C(col));
+    }
+    // Track + thumb
+    {
+        int thumbH = max(12, trackH * visRows / NUM_SCREENS);
+        int avail  = trackH - thumbH;
+        int thumbY = trackY0 + (maxScroll > 0 ? avail * g_scrScroll / maxScroll : 0);
+        spr.fillRoundRect(sbX + 5, thumbY, SCR_SB_W - 10, thumbH, 2, C(COL_GREY));
     }
 }
 
@@ -531,11 +642,12 @@ void settingsEnter() {
     if (clen > 6) clen = 6;
     for (int i = 0; i < clen; i++) g_editCall[i] = g_settings.callsign[i];
 
-    // Scroll to current timezone
+    // Scroll to current timezone (position in the alphabetically-sorted list)
+    ensureTzOrder();
     g_tzScroll = 0;
-    for (int i = 0; i < TZ_COUNT; i++) {
-        if (strcmp(TZ_LIST[i].posix, g_settings.tz) == 0) {
-            g_tzScroll = max(0, i - 3);
+    for (int pos = 0; pos < TZ_COUNT; pos++) {
+        if (strcmp(TZ_LIST[g_tzOrder[pos]].posix, g_settings.tz) == 0) {
+            g_tzScroll = max(0, pos - 3);
             break;
         }
     }
@@ -650,27 +762,49 @@ bool settingsTouchUp(int32_t sx, int32_t sy,
         break;
 
     // ── TIMEZONE ──────────────────────────────────────────────────────────────
-    case PAGE_TIMEZONE:
+    case PAGE_TIMEZONE: {
+        ensureTzOrder();
+        int visRows   = (SCREEN_H - BODY_Y) / TZ_ROW_H;
+        int maxScroll = max(0, TZ_COUNT - visRows);
+
+        // A drag that started in the sidebar is handled live, frame-by-frame,
+        // by drawTimezone() — skip the generic swipe/tap handling entirely so
+        // release doesn't also apply its own +/-1 nudge on top.
+        bool startedInSidebar = (sx >= SCREEN_W - TZ_SB_W);
+
         if (isSwipe) {
-            int visRows = (SCREEN_H - BODY_Y) / TZ_ROW_H;
-            int maxScroll = TZ_COUNT - visRows;
-            if (maxScroll < 0) maxScroll = 0;
-            if (ey < sy) g_tzScroll = min(g_tzScroll + 1, maxScroll);
-            else         g_tzScroll = max(g_tzScroll - 1, 0);
+            if (!startedInSidebar) {
+                if (ey < sy) g_tzScroll = min(g_tzScroll + 1, maxScroll);
+                else         g_tzScroll = max(g_tzScroll - 1, 0);
+            }
             break;
         }
         if (!isTap) break;
         if (sy < BODY_Y && sx < 40) { g_page = PAGE_MENU; break; }
+
+        // Sidebar: page-up / page-down arrows
+        if (startedInSidebar) {
+            if (sy < BODY_Y + TZ_ARROW_H) {
+                g_tzScroll = max(0, g_tzScroll - visRows);
+            } else if (sy >= SCREEN_H - TZ_ARROW_H) {
+                g_tzScroll = min(maxScroll, g_tzScroll + visRows);
+            }
+            break;
+        }
+
+        // Row tap — select timezone
         {
-            int vi = (sy - BODY_Y) / TZ_ROW_H;
-            int ti = g_tzScroll + vi;
-            if (ti >= 0 && ti < TZ_COUNT) {
+            int vi  = (sy - BODY_Y) / TZ_ROW_H;
+            int pos = g_tzScroll + vi;
+            if (pos >= 0 && pos < TZ_COUNT) {
+                int ti = g_tzOrder[pos];
                 strlcpy(g_settings.tz,     TZ_LIST[ti].posix, sizeof(g_settings.tz));
                 strlcpy(g_settings.tzName, TZ_LIST[ti].name,  sizeof(g_settings.tzName));
                 settingsSave();
             }
         }
         break;
+    }
 
     // ── SCREENS ───────────────────────────────────────────────────────────────
     case PAGE_SCREENS: {
@@ -678,17 +812,33 @@ bool settingsTouchUp(int32_t sx, int32_t sy,
         int maxScroll = NUM_SCREENS - visRows;
         if (maxScroll < 0) maxScroll = 0;
 
+        // A drag that started in the sidebar is handled live, frame-by-frame,
+        // by drawScreens() — skip the generic swipe/tap nudge on release.
+        bool startedInSidebar = (sx >= SCREEN_W - SCR_SB_W);
+
         if (isSwipe) {
-            if (ey < sy) g_scrScroll = min(g_scrScroll + 1, maxScroll);
-            else         g_scrScroll = max(g_scrScroll - 1, 0);
+            if (!startedInSidebar) {
+                if (ey < sy) g_scrScroll = min(g_scrScroll + 1, maxScroll);
+                else         g_scrScroll = max(g_scrScroll - 1, 0);
+            }
             break;
         }
         if (!isTap) break;
         if (sy < BODY_Y && sx < 40) { g_page = PAGE_MENU; break; }
+
+        // Sidebar: page-up / page-down arrows
+        if (startedInSidebar) {
+            if (sy < BODY_Y + SCR_ARROW_H) {
+                g_scrScroll = max(0, g_scrScroll - visRows);
+            } else if (sy >= SCREEN_H - SCR_ARROW_H) {
+                g_scrScroll = min(maxScroll, g_scrScroll + visRows);
+            }
+            break;
+        }
         {
             int vi  = (sy - BODY_Y) / SCR_ROW_H;   // visible row index
             int si  = g_scrScroll + vi;             // actual screen index
-            if (vi >= 0 && vi < visRows && si < NUM_SCREENS && sx >= SCREEN_W - 58) {
+            if (vi >= 0 && vi < visRows && si < NUM_SCREENS && sx >= SCR_BTN_X) {
                 bool next = !g_settings.screenEnabled[si];
                 // Must keep at least one screen active
                 if (!next) {

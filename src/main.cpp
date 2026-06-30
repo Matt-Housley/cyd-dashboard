@@ -79,6 +79,11 @@ static unsigned long g_touchDownMs        = 0;
 static bool          g_touching           = false;
 static bool          g_longPressTriggered = false;  // settings opened during hold
 
+// ─── Live touch accessors (declared in ui.h) ──────────────────────────────────
+bool    touchIsActive()  { return g_touching; }
+int32_t touchCurrentX()  { return g_touchLastX; }
+int32_t touchCurrentY()  { return g_touchLastY; }
+
 // ─── Splash helper ────────────────────────────────────────────────────────────
 // All text uses proportional fonts (see fonts/ui_fonts.h); widths via tft.textWidth().
 // Layout (all y values assume callsign is present):

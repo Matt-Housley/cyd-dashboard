@@ -1,6 +1,33 @@
 CYD Dashboard — Version History
 ================================
 
+1.17.002  2026-06-30
+  [Feature] Settings > Screens now has the same right-hand sidebar as
+            Timezone — page-up/page-down arrows and a draggable scroll
+            thumb that also responds to taps in the empty track space.
+            The ON/OFF toggle buttons shifted left to make room.
+
+1.17.001  2026-06-30
+  [Fix] Timezone list scrollbar track now responds to taps above/below
+        the thumb (jumps straight to that position) and supports
+        dragging the thumb up/down. Added live touch-position
+        accessors (touchIsActive/touchCurrentX/touchCurrentY) so a
+        screen's draw function can react to an in-progress touch each
+        frame, not just the final tap/swipe reported on finger-up.
+
+1.17.000  2026-06-30
+  [Feature] Settings > Timezone list is now alphabetically sorted and
+            has a right-hand sidebar with page-up/page-down arrow
+            buttons and a proportional scroll thumb, making it obvious
+            the list extends below the screen and much easier to
+            navigate than swipe-only scrolling.
+  [Fix] Clock screen no longer hardcodes "BST"/"GMT" and "British
+        Summer Time"/"Greenwich Mean Time". The zone badge, sunrise/
+        sunset labels, and footnote are now all derived from the
+        actual configured timezone (via strftime("%Z") and the
+        selected TZ_LIST entry), so non-UK timezones display
+        correctly throughout the Clock screen.
+
 1.16.002  2026-06-30
   [Fix] Timezone auto-detect lookup was reading Open-Meteo's response
         through the shared httpGet() helper, which assumes
