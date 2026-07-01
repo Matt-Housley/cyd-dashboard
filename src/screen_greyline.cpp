@@ -831,4 +831,160 @@ void drawScreenGreyLine() {
     int tw = spr.textWidth(tbuf);
     spr.setCursor(SCREEN_W - tw - 3, MAP_Y0 + 2);
     spr.print(tbuf);
+
+    // ── ISS next-pass info box (bottom-left) ──────────────────────────────────
+    {
+        xSemaphoreTake(g_dataMutex, portMAX_DELAY);
+        ISSData iss2 = g_iss;
+        xSemaphoreGive(g_dataMutex);
+
+        auto azToComp = [](int az) -> const char* {
+            const char* pts[] = {"N","NE","E","SE","S","SW","W","NW"};
+            return pts[((az + 22) % 360) / 45];
+        };
+
+        const int BX  = 2;
+        const int LH  = 11;   // line height for UI_FONT_9
+        const int PAD = 3;
+
+        spr.setFont(UI_FONT_9);
+
+        // degW: pixel width of "N°" where the circle adds 5px past the number text
+        // (gap 1 + circle radius 2 + cursor advance 2 = 5)
+        auto degW = [&](int val) -> int {
+            char nb[8]; snprintf(nb, sizeof(nb), "%d", val);
+            return spr.textWidth(nb) + 5;
+        };
+
+        if (!iss2.passValid) {
+            // No pass found in 5-day scan — nothing to show.
+        } else if (!iss2.passNow &&
+                   (iss2.passRiseSec - (int32_t)time(nullptr)) > 86400) {
+            // Pass is more than 24 hours away — compact single-line date
+            struct tm riseTm;
+            time_t rT = (time_t)iss2.passRiseSec;
+            localtime_r(&rT, &riseTm);
+            char dateBuf[24];
+            strftime(dateBuf, sizeof(dateBuf), "%a %d %b  %H:%M", &riseTm);
+            char msg[40];
+            snprintf(msg, sizeof(msg), "Next ISS pass: %s", dateBuf);
+
+            int BW = PAD + spr.textWidth(msg) + PAD;
+            int BH = PAD + LH + PAD;
+            int BY = MAP_Y0 + MAP_H - BH - 1;
+            spr.fillRect(BX, BY, BW, BH, spr.color888(8, 10, 22));
+            spr.drawRect(BX, BY, BW, BH, spr.color888(50, 80, 130));
+            spr.setTextColor(spr.color888(160, 170, 200));
+            spr.setCursor(BX + PAD, BY + PAD);
+            spr.print(msg);
+        } else {
+            // Full detail box — build all strings first, measure, then draw
+
+            // Format local times
+            struct tm riseTm, setTm;
+            time_t rT = (time_t)iss2.passRiseSec;
+            time_t sT = (time_t)iss2.passSetSec;
+            localtime_r(&rT, &riseTm);
+            localtime_r(&sT, &setTm);
+            char riseBuf[6], setBuf[6];
+            strftime(riseBuf, sizeof(riseBuf), "%H:%M", &riseTm);
+            strftime(setBuf,  sizeof(setBuf),  "%H:%M", &setTm);
+
+            int durMin = (int)((iss2.passSetSec - iss2.passRiseSec) / 60);
+
+            char untilBuf[12] = "";
+            if (!iss2.passNow) {
+                time_t nowT2 = time(nullptr);
+                int secs = (int)(iss2.passRiseSec - nowT2);
+                if (secs < 0) secs = 0;
+                int h = secs / 3600, m = (secs % 3600) / 60;
+                if (h > 0) snprintf(untilBuf, sizeof(untilBuf), "in %dh%02dm", h, m);
+                else        snprintf(untilBuf, sizeof(untilBuf), "in %dm", m);
+            }
+
+            char line1[32];
+            if (iss2.passNow)
+                snprintf(line1, sizeof(line1), "Until %s  (%d min)", setBuf, durMin);
+            else
+                snprintf(line1, sizeof(line1), "%s - %s  (%d min)", riseBuf, setBuf, durMin);
+
+            // Line 3: "Rise XX NNN  Set XX NNN" — text parts + two degree circles
+            char riseLabel[12], setLabel[12];
+            snprintf(riseLabel, sizeof(riseLabel), "Rise %s ", azToComp(iss2.passRiseAz));
+            snprintf(setLabel,  sizeof(setLabel),  "  Set %s ", azToComp(iss2.passSetAz));
+            int w3 = spr.textWidth(riseLabel) + degW(iss2.passRiseAz)
+                   + spr.textWidth(setLabel)  + degW(iss2.passSetAz);
+
+            // Line 4: "Max elevation: NNN" + degree circle
+            int w4 = spr.textWidth("Max elevation: ") + degW(iss2.passMaxEl);
+
+            const char* title = iss2.passNow ? "ISS VISIBLE NOW" : "NEXT ISS PASS";
+            int BW = PAD + 2;   // 2 extra so circle on last line doesn't touch border
+            BW = max(BW, PAD + (int)spr.textWidth(title)  + PAD);
+            BW = max(BW, PAD + (int)spr.textWidth(line1)  + PAD);
+            BW = max(BW, PAD + (int)spr.textWidth(untilBuf) + PAD);
+            BW = max(BW, PAD + w3 + PAD);
+            BW = max(BW, PAD + w4 + PAD);
+
+            const int LINES = 5;
+            const int BH = PAD + LINES * LH + (LINES - 1) * 1 + PAD;
+            const int BY = MAP_Y0 + MAP_H - BH - 1;
+
+            uint32_t borderCol = iss2.passNow
+                ? spr.color888(0, 200, 80) : spr.color888(50, 80, 130);
+            spr.fillRect(BX, BY, BW, BH, spr.color888(8, 10, 22));
+            spr.drawRect(BX, BY, BW, BH, borderCol);
+
+            // Helper: print integer + drawn degree circle
+            auto printDeg = [&](int val, uint32_t col) {
+                char nb[8]; snprintf(nb, sizeof(nb), "%d", val);
+                spr.setTextColor(col);
+                spr.print(nb);
+                int cx2 = spr.getCursorX() + 1;
+                int cy2 = spr.getCursorY() + 1;
+                spr.drawCircle(cx2, cy2, 2, col);
+                spr.setCursor(cx2 + 4, spr.getCursorY());
+            };
+
+            int ty = BY + PAD;
+
+            // Line 0: title
+            spr.setTextColor(iss2.passNow ? spr.color888(0, 220, 100)
+                                          : spr.color888(0, 200, 255));
+            spr.setCursor(BX + PAD, ty);  spr.print(title);
+            ty += LH + 1;
+
+            // Line 1: time range + duration
+            spr.setTextColor(spr.color888(200, 200, 220));
+            spr.setCursor(BX + PAD, ty);  spr.print(line1);
+            ty += LH + 1;
+
+            // Line 2: time-until
+            if (!iss2.passNow && untilBuf[0]) {
+                spr.setTextColor(spr.color888(160, 180, 200));
+                spr.setCursor(BX + PAD, ty);
+                spr.print(untilBuf);
+            }
+            ty += LH + 1;
+
+            // Line 3: rise / set azimuths
+            {
+                uint32_t col3 = spr.color888(180, 180, 200);
+                spr.setTextColor(col3);
+                spr.setCursor(BX + PAD, ty);
+                spr.print(riseLabel);  printDeg(iss2.passRiseAz, col3);
+                spr.print(setLabel);   printDeg(iss2.passSetAz,  col3);
+            }
+            ty += LH + 1;
+
+            // Line 4: max elevation
+            {
+                uint32_t col4 = spr.color888(160, 160, 180);
+                spr.setTextColor(col4);
+                spr.setCursor(BX + PAD, ty);
+                spr.print("Max elevation: ");
+                printDeg(iss2.passMaxEl, col4);
+            }
+        }
+    }
 }

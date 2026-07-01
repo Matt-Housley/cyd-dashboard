@@ -147,6 +147,8 @@ static void applyDefaults(AppSettings& s) {
     s.modeFilter = SPOT_MODE_ALL;
     s.touchCalValid = false;
     memset(s.touchCal, 0, sizeof(s.touchCal));
+    s.issJumpEnabled = true;
+    s.brightness     = 200;
 }
 
 // ─── Load ─────────────────────────────────────────────────────────────────────
@@ -182,7 +184,9 @@ void settingsLoad() {
     strlcpy(g_settings.trackerName,   doc["sname"] | "S&P 500",          sizeof(g_settings.trackerName));
     g_settings.trackerRangeYears =    doc["range"] | 4;
     strlcpy(g_settings.callsign,    doc["call"]   | "M0KGO", sizeof(g_settings.callsign));
-    g_settings.modeFilter =          doc["modes"]  | (int)SPOT_MODE_ALL;
+    g_settings.modeFilter =          doc["modes"]    | (int)SPOT_MODE_ALL;
+    g_settings.issJumpEnabled =      doc["issJump"]   | true;
+    g_settings.brightness     = (uint8_t)(doc["bright"] | 200);
 
     JsonArray tc = doc["tcal"].as<JsonArray>();
     if (tc.size() == 8) {
@@ -218,7 +222,9 @@ void settingsSave() {
     doc["sname"]  = g_settings.trackerName;
     doc["range"]  = g_settings.trackerRangeYears;
     doc["call"]   = g_settings.callsign;
-    doc["modes"]  = g_settings.modeFilter;
+    doc["modes"]   = g_settings.modeFilter;
+    doc["issJump"] = g_settings.issJumpEnabled;
+    doc["bright"]  = g_settings.brightness;
 
     JsonArray en = doc["screens"].to<JsonArray>();
     for (int i = 0; i < NUM_SCREENS; i++) en.add(g_settings.screenEnabled[i]);

@@ -5,32 +5,46 @@
 #include <time.h>
 #include <math.h>
 #include "fonts/ui_fonts.h"
+#include "moon_texture.h"   // 41×41 RGB565 moon photo from PROGMEM
 
 // ─── Moon graphic ─────────────────────────────────────────────────────────────
-// 3-D sphere illumination.  phase 0=new, 0.25=first quarter,
-// 0.5=full, 0.75=last quarter.
-// Formula: lit when  nx*sin(2π·p) - nz*cos(2π·p) > 0
+// Samples the moon photo texture for lit pixels; dark blue-grey for the
+// unlit (shadow) side.  MOON_TEX is 41×41 = (2R+1)×(2R+1) pixels.
+// phase 0=new, 0.25=first quarter, 0.5=full, 0.75=last quarter.
 static void drawMoon(int cx, int cy, int R, float phase) {
     const float PI2 = 2.0f * (float)M_PI;
     const float sp  = sinf(PI2 * phase);
     const float cp  = cosf(PI2 * phase);
+    const int   SZ  = 2 * R + 1;   // texture dimension (41 for R=20)
     float Rf = (float)R;
     for (int dy = -R; dy <= R; dy++) {
         for (int dx = -R; dx <= R; dx++) {
             float nx = (float)dx / Rf;
             float ny = (float)dy / Rf;
             float nz2 = 1.0f - nx*nx - ny*ny;
-            if (nz2 < 0.0f) continue;          // outside circle
+            if (nz2 < 0.0f) continue;          // outside disc
             float nz  = sqrtf(nz2);
             bool  lit = (nx * sp - nz * cp) > 0.0f;
-            uint32_t col = lit
-                ? C(0xE8E8D8UL)                // warm white lit surface
-                : C(0x16182AUL);               // very dark blue-grey night side
+
+            uint32_t col;
+            if (lit) {
+                // Sample texture — pixel (tx, ty) in the 41×41 image
+                int tx = dx + R;
+                int ty = dy + R;
+                uint16_t px = pgm_read_word(&MOON_TEX[ty * SZ + tx]);
+                // RGB565 → RGB888
+                uint8_t pr = (px >> 11) << 3;
+                uint8_t pg = ((px >> 5) & 0x3F) << 2;
+                uint8_t pb = (px & 0x1F) << 3;
+                col = C(((uint32_t)pr << 16) | ((uint32_t)pg << 8) | pb);
+            } else {
+                col = C(0x0D0F1AUL);            // very dark, dim unlit side
+            }
             spr.drawPixel(cx + dx, cy + dy, col);
         }
     }
-    // Faint outline so the disc shows against the background
-    spr.drawCircle(cx, cy, R, C(0x3A3A4AUL));
+    // Faint rim so the disc edge reads against the background
+    spr.drawCircle(cx, cy, R, C(0x2A2A3AUL));
 }
 
 // ─── Moon phase ───────────────────────────────────────────────────────────────

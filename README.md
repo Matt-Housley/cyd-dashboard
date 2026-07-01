@@ -25,11 +25,11 @@ The dashboard cycles through 13 screens, each auto-refreshing on its own schedul
 
 | Screen | Description | Data Source | Refresh |
 |--------|-------------|-------------|---------|
-| **Clock** | Large digital clock with date and timezone | NTP (pool.ntp.org) | Continuous |
+| **Clock** | Large digital clock with date, timezone, moon phase (real photo texture), and sunrise/sunset | NTP (pool.ntp.org) | Continuous |
 | **Weather** | 7-day forecast with animated weather icons | Open-Meteo API | 10 min |
-| **HF Conditions** | HF propagation bar chart by band | HamQSL solar XML | 15 min |
+| **HF Conditions** | HF propagation bar chart by band; tap any index tile for an explanation overlay | HamQSL solar XML | 15 min |
 | **Propagation** | Solar flux, K-index, A-index, band conditions | HamQSL solar XML | 15 min |
-| **Grey Line** | Day/night world map with terminator, sun, and QTH | Calculated | Continuous |
+| **Grey Line** | Day/night world map with terminator, sun, QTH, and ISS ground track; shows next ISS pass details | Calculated | Continuous |
 | **PSK Reporter** | Who's hearing your signal — auto-zoomed map with spots | PSK Reporter API | 2 min |
 | **DX Spots** | Nearby DX cluster spots sorted by distance | DXLite (G7VJR) | 60 s |
 | **POTA Spots** | Parks on the Air activations sorted by distance | POTA API | 60 s |
@@ -50,20 +50,26 @@ The dashboard cycles through 13 screens, each auto-refreshing on its own schedul
 The status bar sits at the top of every screen:
 
 - **Left** — current screen number/total and name, e.g. `3/13 HF Conditions`
-- **Centre** — local time (`HH:MM`)
+- **Centre** — local time (`HH:MM`); tap to jump to the Clock screen
 - **Right** — four tap targets, evenly spaced:
   - ⏯ **Play/Pause** — toggle auto-advance
   - **▸▸ Advance** — jump to the next enabled screen immediately
-  - **WiFi bars** — signal strength (0-4 bars; tap has no action)
+  - **WiFi bars** — signal strength (0–4 bars); tap to show an overlay with SSID, IP address, MAC address, and RSSI
   - **☰ Menu** — open on-device Settings
 
 ## Features
 
 - **Touch navigation** — swipe left/right to change screens, or use the status bar buttons (auto-advance no longer triggers on a content-area tap, so screens like PSK Reporter and Contests can use taps for their own interactions)
 - **Auto-play** — screens cycle automatically (8 seconds each, 16s on the Clock); toggle with the play/pause button
+- **Moon phase display** — the Clock screen shows a real lunar photograph (41×41 px RGB565, stored in PROGMEM) masked to the current phase, so the lit portion shows actual surface detail
+- **ISS pass prediction** — the Grey Line screen shows a "Next ISS Pass" box in the bottom-left corner with rise and set times, azimuth bearings, pass duration, and peak elevation. The prediction uses the same analytical orbital model as the ground track, scanning up to 5 days ahead. When the ISS is currently above 5° the box turns green and reads "ISS VISIBLE NOW". When the next pass is more than 24 hours away a compact single-line date is shown instead
+- **ISS Pass Alert** — an optional setting (Settings > ISS Pass Alert, default on) that automatically jumps to the Grey Line screen the moment the ISS rises above 5° from your QTH, and holds there until the pass ends. Normal auto-scroll then resumes. Press the Play/Pause button during a pass to exit the hold early
+- **HF index overlays** — on the HF Conditions screen, tap any index tile (SFI, SSN, A, K, or X-Ray) to see a pop-up explaining the value range, the ideal, what the index means, and its effect on HF propagation. Auto-scroll pauses while the overlay is open; tap anywhere to dismiss
+- **WiFi info overlay** — tap the WiFi bars in the status bar to see the connected SSID, IP address, MAC address, and signal strength. Tap anywhere to dismiss
 - **Touch calibration** — Settings > Touch Calibrate runs a 4-point crosshair calibration (powered by LovyanGFX) and persists the result to flash
 - **Automatic timezone detection** — saving a new grid locator in Settings > Location triggers a background lookup (via Open-Meteo's timezone resolver) that matches your coordinates to the correct timezone and applies it automatically; falls back to a manual prompt if no match is found
 - **Live location updates** — changing the grid locator immediately resets the Weather screen to its loading state and forces a fresh fetch for the new coordinates, rather than showing stale data for the old location
+- **Screen brightness control** — Settings > Brightness provides a draggable slider and four quick-select presets (25% / 50% / 75% / 100%). The change takes effect immediately and is saved to flash. Reducing brightness can help with flickering on USB-powered boards
 - **PSK Reporter** — animated pulsing markers for your furthest and loudest reception spots, with a tap-to-inspect overlay showing callsign, country, grid, band, SNR, and distance; the map auto-zooms to fit your QTH and all current spots while preserving correct aspect ratio (letterboxed if needed)
 - **Mode filter** — filter DX, POTA, and SOTA spots by mode (CW, Voice, FT8, FT4, Digital, Other) from Settings > Mode Filter
 - **Contest detail** — tap any contest to fetch mode, bands, and exchange requirements from contestcalendar.com, with word-wrapping for long exchange formats and a clear error state if the lookup fails
@@ -101,15 +107,17 @@ Alternatively, create `data/wifi.txt` with your SSID on line 1 and password on l
 
 ### Configuration
 
-Tap the ☰ menu icon at the right of the status bar to open on-device settings:
+Tap the ☰ menu icon at the right of the status bar to open on-device settings. The menu is alphabetically ordered and scrollable (sidebar with up/down arrows and a drag thumb):
 
-- **Location** — 6-character Maidenhead grid locator (used for distance calculations, map position, and weather). Saving a new grid automatically detects and applies the correct timezone.
-- **Timezone** — select from 22 common timezones, or let Location auto-detect it for you
-- **Screens** — enable/disable individual screens
-- **Tracker** — choose stock/crypto symbol and chart range (1-5 years)
+- **Brightness** — drag slider or use presets to set backlight level; takes effect immediately
 - **Callsign** — your amateur radio callsign (used for PSK Reporter)
+- **ISS Pass Alert** — auto-jump to Grey Line when the ISS is visible from your QTH (only shown when the Grey Line screen is enabled)
+- **Location** — 6-character Maidenhead grid locator (used for distance calculations, map position, and weather). Saving a new grid automatically detects and applies the correct timezone
 - **Mode Filter** — toggle CW, Voice, FT8, FT4, Digital, and Other modes for the DX/POTA/SOTA spot screens
+- **Screens** — enable/disable individual screens
+- **Timezone** — select from 22 common timezones, or let Location auto-detect it for you
 - **Touch Calibrate** — run if touches don't line up with what's displayed
+- **Tracker** — choose stock/crypto symbol and chart range (1–5 years)
 
 ## Project Structure
 
@@ -118,13 +126,14 @@ include/
   config.h              Screen IDs, API URLs, timing, colour palette
   data_store.h          Shared data structures for all screens
   settings.h            Persistent settings and mode filter defines
+  moon_texture.h        41×41 RGB565 moon photograph (PROGMEM, ~3.4 KB flash)
   screen_*.h            Per-screen headers
   lgfx_config.h         LovyanGFX display/touch configuration
   fonts/                Custom font headers (Akzidenz Grotesk)
 src/
-  main.cpp              Setup, touch handling, screen cycling
-  ui.cpp                Sprite management, status bar, draw dispatch
-  fetch.cpp             Background fetch task (core 1), all API calls
+  main.cpp              Setup, touch handling, screen cycling, ISS pass alert
+  ui.cpp                Sprite management, status bar, WiFi overlay, draw dispatch
+  fetch.cpp             Background fetch task (core 1), all API calls, ISS pass prediction
   settings.cpp          SPIFFS load/save, grid-to-lat/lon, mode classification
   screen_*.cpp          Per-screen rendering
 data/

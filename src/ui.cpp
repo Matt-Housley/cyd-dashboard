@@ -3,7 +3,7 @@
 #include <esp_heap_caps.h>
 #include <time.h>
 
-// WiFi signal — implemented in main.cpp so WiFi.h never enters this TU
+// WiFi helpers — implemented in main.cpp so WiFi.h never enters this TU
 extern int getWiFiBars();
 #include "screen_clock.h"
 #include "screen_weather.h"
@@ -179,10 +179,86 @@ static const char* SCREEN_LABELS[NUM_SCREENS] = {
 
 static int s_sbCogX, s_sbWifiX, s_sbAdvX, s_sbPlayX;
 
-void getStatusBarLayout(int& playX, int& advX, int& cogX) {
+void getStatusBarLayout(int& playX, int& advX, int& wifiX, int& cogX) {
     playX = s_sbPlayX;
     advX  = s_sbAdvX;
+    wifiX = s_sbWifiX;
     cogX  = s_sbCogX;
+}
+
+// ─── WiFi info overlay ────────────────────────────────────────────────────────
+static bool s_wifiOverlay = false;
+static char s_wifiSSID[33] = {};
+static char s_wifiIP[16]   = {};
+static char s_wifiMAC[18]  = {};
+static int  s_wifiRSSI     = 0;
+
+void showWifiOverlay(const char* ssid, const char* ip, const char* mac, int rssi) {
+    strlcpy(s_wifiSSID, ssid, sizeof(s_wifiSSID));
+    strlcpy(s_wifiIP,   ip,   sizeof(s_wifiIP));
+    strlcpy(s_wifiMAC,  mac,  sizeof(s_wifiMAC));
+    s_wifiRSSI    = rssi;
+    s_wifiOverlay = true;
+}
+void hideWifiOverlay()      { s_wifiOverlay = false; }
+bool wifiOverlayVisible()   { return s_wifiOverlay; }
+
+static void drawWifiOverlay() {
+    spr.setFont(UI_FONT_9);
+
+    // Measure to fit box width to the widest line
+    char ssidLine[48], ipLine[32], macLine[32], sigLine[32];
+    snprintf(ssidLine, sizeof(ssidLine), "SSID:   %s", s_wifiSSID);
+    snprintf(ipLine,   sizeof(ipLine),   "IP:     %s", s_wifiIP);
+    snprintf(macLine,  sizeof(macLine),  "MAC:    %s", s_wifiMAC);
+    int bars = (s_wifiRSSI > -55) ? 4 : (s_wifiRSSI > -65) ? 3 :
+               (s_wifiRSSI > -75) ? 2 : 1;
+    snprintf(sigLine,  sizeof(sigLine),  "Signal: %d dBm", s_wifiRSSI);
+
+    spr.setFont(UI_FONT_12);
+    int titleW = spr.textWidth("WiFi Information");
+    spr.setFont(UI_FONT_9);
+    int w = titleW;
+    auto mw = [&](const char* s){ int tw = spr.textWidth(s); if (tw > w) w = tw; };
+    mw(ssidLine); mw(ipLine); mw(macLine); mw(sigLine);
+
+    const int IPX    = 7, IPY = 5;
+    const int LH     = 11;
+    const int DIVGAP = 7;   // gap from title baseline to first data line
+                            // divider drawn at +2, leaving 5px to text — matches bottom IPY
+    const int BW  = w + 2 * IPX;
+    const int BH  = IPY + 14 + DIVGAP + LH + LH + LH + LH + IPY;
+    const int BX  = (SCREEN_W - BW) / 2;
+    const int BY  = STATUS_H + 6;
+
+    spr.fillRect(BX, BY, BW, BH, spr.color888(10, 12, 26));
+    spr.drawRect(BX, BY, BW, BH, spr.color888(60, 120, 200));
+    spr.drawFastHLine(BX + 1, BY + IPY + 14 + 2, BW - 2, spr.color888(40, 80, 150));
+
+    int tx = BX + IPX;
+    int ty = BY + IPY;
+
+    spr.setFont(UI_FONT_12);
+    spr.setTextColor(spr.color888(0, 210, 255));
+    spr.setCursor(tx, ty); spr.print("WiFi Information");
+    ty += 14 + DIVGAP;
+
+    spr.setFont(UI_FONT_9);
+
+    spr.setTextColor(spr.color888(180, 180, 200));
+    spr.setCursor(tx, ty); spr.print(ssidLine); ty += LH;
+    spr.setCursor(tx, ty); spr.print(ipLine);   ty += LH;
+    spr.setCursor(tx, ty); spr.print(macLine);  ty += LH;
+
+    // Signal line: text + small bar graphic
+    spr.setCursor(tx, ty);
+    spr.print(sigLine);
+    int barX = tx + spr.textWidth(sigLine) + 4;
+    for (int b = 0; b < 4; b++) {
+        int bh = 3 + b * 2;
+        uint32_t col = (b < bars) ? spr.color888(0, 200, 80) : spr.color888(40, 40, 50);
+        spr.fillRect(barX + b * 5, ty + (8 - bh), 4, bh, col);
+    }
 }
 
 static void drawStatusBar(int screenID, bool autoPlay, bool paused) {
@@ -318,6 +394,8 @@ void uiDraw(int screenID, bool autoPlay, bool paused, bool inSettings) {
             case SCR_CONTESTS:    drawScreenContests();    break;
         }
     }
+
+    if (s_wifiOverlay) drawWifiOverlay();
 
     if (gDisplay) spr.pushSprite(gDisplay, 0, 0);
 }

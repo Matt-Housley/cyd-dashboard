@@ -79,6 +79,15 @@ struct ISSData {
     float trackLat[32];
     float trackLon[32];
     int   trackCount = 0;
+
+    // Next visible pass from QTH (MIN_EL = 5°), computed in fetchISS()
+    bool    passValid      = false;
+    bool    passNow        = false;   // ISS is currently above horizon
+    int32_t passRiseSec    = 0;       // UNIX time of rise (or now if passNow)
+    int32_t passSetSec     = 0;       // UNIX time of set
+    int16_t passRiseAz     = 0;       // rise azimuth, degrees 0-359
+    int16_t passSetAz      = 0;       // set azimuth, degrees 0-359
+    int8_t  passMaxEl      = 0;       // peak elevation during pass, degrees
 };
 
 // ─── DX Spots ─────────────────────────────────────────────────────────────────

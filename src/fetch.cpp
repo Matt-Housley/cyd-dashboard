@@ -1373,6 +1373,71 @@ void fetchISS() {
         iss.trackLon[k] = tlon;
     }
 
+    // ── Next visible pass prediction ──────────────────────────────────────────
+    // Scan forward in 30 s steps for up to 3 orbits (~16800 s).
+    // Elevation formula:  slant² = Re² + (Re+h)² – 2·Re·(Re+h)·cos(ρ)
+    //                     el     = arcsin( ((Re+h)·cos(ρ) – Re) / slant )
+    // Azimuth: bearing from QTH to sub-satellite point.
+    {
+        const float RE    = 6371.0f;       // Earth radius, km
+        const float ALT   = 408.0f;        // ISS altitude, km
+        const float MINEL = 5.0f;          // minimum useful elevation, °
+        const float D2R   = (float)M_PI / 180.0f;
+
+        float qLat = g_settings.lat * D2R;
+        float qLon = g_settings.lon * D2R;
+        time_t nowT = time(nullptr);
+
+        bool    inPass   = false;
+        int32_t riseStep = 0;
+        float   riseAz   = 0.0f;
+        float   maxEl    = -90.0f;
+
+        iss.passValid = false;
+
+        for (int step = 0; step <= 432000; step += 30) {   // up to 5 days
+            float dt  = (float)step;
+            float u   = u0 + N * dt;
+
+            float sLatR = asinf(constrain(sinf(INC) * sinf(u), -1.0f, 1.0f));
+            float dLam  = atan2f(cosf(INC) * sinf(u), cosf(u)) - lambda0;
+            float sLonD = lon + dLam * 180.0f / (float)M_PI - EARTH_W * dt;
+            while (sLonD >  180.0f) sLonD -= 360.0f;
+            while (sLonD < -180.0f) sLonD += 360.0f;
+            float sLonR = sLonD * D2R;
+
+            float cosRho = constrain(
+                sinf(qLat)*sinf(sLatR) + cosf(qLat)*cosf(sLatR)*cosf(sLonR - qLon),
+                -1.0f, 1.0f);
+            float slant = sqrtf(RE*RE + (RE+ALT)*(RE+ALT) - 2.0f*RE*(RE+ALT)*cosRho);
+            float el = asinf(((RE+ALT)*cosRho - RE) / slant) * 180.0f / (float)M_PI;
+
+            float dLon = sLonR - qLon;
+            float az   = atan2f(sinf(dLon)*cosf(sLatR),
+                                cosf(qLat)*sinf(sLatR) - sinf(qLat)*cosf(sLatR)*cosf(dLon))
+                         * 180.0f / (float)M_PI;
+            if (az < 0.0f) az += 360.0f;
+
+            if (!inPass && el >= MINEL) {
+                inPass   = true;
+                riseStep = step;
+                riseAz   = az;
+                maxEl    = el;
+            } else if (inPass && el >= MINEL) {
+                if (el > maxEl) maxEl = el;
+            } else if (inPass && el < MINEL) {
+                iss.passValid   = true;
+                iss.passNow     = (riseStep == 0);
+                iss.passRiseSec = (int32_t)nowT + riseStep;
+                iss.passSetSec  = (int32_t)nowT + step;
+                iss.passRiseAz  = (int16_t)roundf(riseAz);
+                iss.passSetAz   = (int16_t)roundf(az);
+                iss.passMaxEl   = (int8_t)roundf(maxEl);
+                break;
+            }
+        }
+    }
+
     xSemaphoreTake(g_dataMutex, portMAX_DELAY);
     g_iss = iss;
     xSemaphoreGive(g_dataMutex);

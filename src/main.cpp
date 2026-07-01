@@ -14,6 +14,7 @@
 #include "screen_settings.h"
 #include "screen_pskreporter.h"
 #include "screen_contests.h"
+#include "screen_hf_now.h"
 #include "fonts/ui_fonts.h"
 #include <esp_wifi.h>
 
@@ -64,11 +65,12 @@ static StaticTask_t s_fetchTaskBuffer;
 static StackType_t  s_fetchTaskStack[8192];   // StackType_t = uint8_t on ESP32
 
 // ─── Navigation state ─────────────────────────────────────────────────────────
-static uint8_t       g_screen     = SCR_CLOCK;
-static bool          g_autoPlay   = true;
-static unsigned long g_lastCycle  = 0;
-static unsigned long g_pauseUntil = 0;
-static bool          g_inSettings = false;
+static uint8_t       g_screen       = SCR_CLOCK;
+static bool          g_autoPlay     = true;
+static unsigned long g_lastCycle    = 0;
+static unsigned long g_pauseUntil   = 0;
+static bool          g_inSettings   = false;
+static bool          g_issPassActive = false;  // true while auto-held on Grey Line for ISS pass
 
 // ─── Touch / swipe state ──────────────────────────────────────────────────────
 static int32_t       g_touchStartX        = 0;
@@ -194,6 +196,9 @@ static void applySettings() {
     setenv("TZ", g_settings.tz, 1);
     tzset();
 
+    // Backlight
+    tft.setBrightness(g_settings.brightness);
+
     // Jump away if current screen was just disabled
     if (!g_settings.screenEnabled[g_screen])
         g_screen = (uint8_t)nextEnabledScreen(g_screen, +1);
@@ -274,26 +279,51 @@ static void handleTouch() {
             else         prevScreen();
 
         } else if (abs(dx) < 20 && abs(dy) < 20 && dt < 400) {
-            if (g_touchStartY < STATUS_H + 8) {
+            if (wifiOverlayVisible()) {
+                // Any tap anywhere dismisses the WiFi overlay
+                hideWifiOverlay();
+            } else if (g_touchStartY < STATUS_H + 8) {
                 // ── Status bar tap — hit-test buttons ────────────────────────
-                int playX, advX, cogX;
-                getStatusBarLayout(playX, advX, cogX);
+                int playX, advX, wifiX, cogX;
+                getStatusBarLayout(playX, advX, wifiX, cogX);
 
                 if (g_touchStartX >= cogX) {
                     settingsEnter();
                     g_inSettings = true;
                     g_pauseUntil = millis() + 60000UL;
+                } else if (g_touchStartX >= SCREEN_W/2 - 40 &&
+                           g_touchStartX <= SCREEN_W/2 + 40 &&
+                           g_touchStartX < wifiX) {
+                    // Time — jump to clock screen
+                    goTo(SCR_CLOCK);
+                } else if (g_touchStartX >= wifiX) {
+                    // WiFi bars — show info overlay
+                    char ssid[33], ip[16], mac[18];
+                    strlcpy(ssid, WiFi.SSID().c_str(),             sizeof(ssid));
+                    strlcpy(ip,   WiFi.localIP().toString().c_str(), sizeof(ip));
+                    strlcpy(mac,  WiFi.macAddress().c_str(),        sizeof(mac));
+                    showWifiOverlay(ssid, ip, mac, WiFi.RSSI());
                 } else if (g_touchStartX >= advX) {
                     goTo(nextEnabledScreen(g_screen, +1));
                 } else if (g_touchStartX >= playX) {
-                    g_autoPlay = !g_autoPlay;
-                    if (g_autoPlay) g_lastCycle = millis();
+                    if (g_issPassActive) {
+                        // User ending ISS pass hold early — resume normal auto-play
+                        g_issPassActive = false;
+                        g_autoPlay      = true;
+                        g_lastCycle     = millis();
+                    } else {
+                        g_autoPlay = !g_autoPlay;
+                        if (g_autoPlay) g_lastCycle = millis();
+                    }
                 }
             } else if (g_screen == SCR_PSKREPORTER &&
                        pskTouchUp(g_touchStartX, g_touchStartY)) {
                 g_pauseUntil = millis() + 10000UL;
             } else if (g_screen == SCR_CONTESTS &&
                        contestTouchUp(g_touchStartX, g_touchStartY)) {
+                g_lastCycle = millis();
+            } else if (g_screen == SCR_HF_NOW &&
+                       hfNowTouchUp(g_touchStartX, g_touchStartY)) {
                 g_lastCycle = millis();
             }
         }
@@ -318,7 +348,7 @@ void setup() {
     tft.setRotation(1);
     if (g_settings.touchCalValid)
         tft.setTouchCalibrate(g_settings.touchCal);
-    tft.setBrightness(210);
+    tft.setBrightness(g_settings.brightness);
     tft.fillScreen(TFT_BLACK);
     uiInit(&tft);   // allocates 76,800 B sprite from the largest DMA block (~110 KB)
     Serial.printf("[ui] post-sprite lb8bit=%u  heap=%u\n",
@@ -428,10 +458,37 @@ void setup() {
 void loop() {
     handleTouch();
 
+    // ── ISS pass detection ────────────────────────────────────────────────────
+    // Check passNow flag (updated every ~30 s by fetchISS) and jump to/from
+    // the Grey Line screen when a pass starts or ends.
+    if (!g_inSettings && g_settings.issJumpEnabled) {
+        static bool s_prevPassNow = false;
+        bool passNow = false;
+        xSemaphoreTake(g_dataMutex, portMAX_DELAY);
+        passNow = g_iss.passValid && g_iss.passNow;
+        xSemaphoreGive(g_dataMutex);
+
+        if (passNow && !s_prevPassNow) {
+            // Pass just started — jump to Grey Line and hold
+            g_issPassActive = true;
+            g_screen        = SCR_GREYLINE;
+            g_lastCycle     = millis();
+        }
+        if (!passNow && s_prevPassNow && g_issPassActive) {
+            // Pass just ended naturally — resume auto-play
+            g_issPassActive = false;
+            g_autoPlay      = true;
+            g_lastCycle     = millis();
+        }
+        s_prevPassNow = passNow;
+    }
+
     if (!g_inSettings) {
         // Auto-cycle — skip disabled screens
         bool paused = (millis() < g_pauseUntil)
-                    || (g_screen == SCR_CONTESTS && contestHasSelection());
+                    || (g_screen == SCR_CONTESTS && contestHasSelection())
+                    || (g_screen == SCR_HF_NOW   && hfNowHasSelection())
+                    || g_issPassActive;
         unsigned long cycleMs = (g_screen == SCR_CLOCK) ? CYCLE_MS * 2 : CYCLE_MS;
         if (g_autoPlay && !paused && (millis() - g_lastCycle >= cycleMs)) {
             g_screen    = (uint8_t)nextEnabledScreen(g_screen, +1);

@@ -10,7 +10,12 @@ void uiInit(LGFX* display);
 void uiDraw(int screenID, bool autoPlay, bool paused, bool inSettings = false);
 
 // Status bar button X positions for touch hit-testing
-void getStatusBarLayout(int& playX, int& advX, int& cogX);
+void getStatusBarLayout(int& playX, int& advX, int& wifiX, int& cogX);
+
+// WiFi info overlay — shown when the WiFi bars in the status bar are tapped
+void showWifiOverlay(const char* ssid, const char* ip, const char* mac, int rssi);
+void hideWifiOverlay();
+bool wifiOverlayVisible();
 
 // Live touch state — lets a screen's draw function react to an in-progress
 // touch (e.g. dragging a scrollbar thumb) rather than only the final tap/swipe

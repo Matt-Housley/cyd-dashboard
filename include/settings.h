@@ -50,6 +50,8 @@ struct AppSettings {
     uint8_t  modeFilter;                  // bitmask of enabled modes (MODE_*)
     bool     touchCalValid;               // true if touchCal has been set
     uint16_t touchCal[8];                 // LovyanGFX calibration parameters
+    bool     issJumpEnabled;              // jump to Grey Line screen during ISS passes
+    uint8_t  brightness;                  // backlight level 0-255
 };
 
 // Classify a mode string into a MODE_* bit

@@ -18,9 +18,11 @@ enum SettingsPage : uint8_t {
     PAGE_MODES,
     PAGE_CALIBRATE,
     PAGE_TZ_DETECT,
+    PAGE_BRIGHTNESS,
 };
 
 static SettingsPage g_page        = PAGE_MENU;
+static int          g_menuScroll  = 0;      // menu first-visible row
 static int          g_tzScroll    = 0;      // timezone list first-visible row
 static int          g_scrScroll   = 0;      // screens list first-visible row
 static char         g_editGrid[8];          // working copy for location editor
@@ -107,6 +109,12 @@ static void drawSubHeader(const char* title) {
 }
 
 // ─── PAGE_MENU ────────────────────────────────────────────────────────────────
+static const int MNU_SB_W    = 22;
+static const int MNU_ARROW_H = 22;
+static const int MNU_LIST_W  = SCREEN_W - MNU_SB_W;
+static const int MNU_ROW_H   = 28;
+static const int MNU_NROWS   = 9;   // 8 sub-page rows + 1 inline toggle
+
 static void drawMenu() {
     // Header
     spr.fillRect(0, HDR_Y, SCREEN_W, HDR_H, C(0x1A1A1AUL));
@@ -119,31 +127,105 @@ static void drawMenu() {
     spr.setCursor(SCREEN_W - 22, HDR_Y + 7);
     spr.print("X");
 
-    static const int rowH  = 28;
-    static const int NROWS = 7;
+    int visRows  = (SCREEN_H - BODY_Y) / MNU_ROW_H;
+    int maxScroll = max(0, MNU_NROWS - visRows);
+    if (g_menuScroll > maxScroll) g_menuScroll = maxScroll;
 
-    static const char* labels[NROWS] = {
-        "Location", "Timezone", "Screens", "Tracker", "Callsign",
-        "Mode Filter", "Touch Calibrate"
+    // Live drag on sidebar track
+    if (touchIsActive() && maxScroll > 0) {
+        int32_t tx = touchCurrentX();
+        int32_t ty = touchCurrentY();
+        if (tx >= MNU_LIST_W) {
+            int trackY0 = BODY_Y + MNU_ARROW_H + 3;
+            int trackY1 = SCREEN_H - MNU_ARROW_H - 3;
+            if (ty >= trackY0 && ty <= trackY1 && trackY1 > trackY0) {
+                float frac = (float)(ty - trackY0) / (float)(trackY1 - trackY0);
+                g_menuScroll = (int)(constrain(frac, 0.0f, 1.0f) * maxScroll + 0.5f);
+            }
+        }
+    }
+
+    // Alphabetical order: ri 0,1 then toggle at 2, then ri 3-8 sub-pages
+    // Sub-page labels indexed by li = ri < 2 ? ri : ri - 1
+    static const char* labels[8] = {
+        "Brightness", "Callsign", "Location", "Mode Filter",
+        "Screens", "Timezone", "Touch Calibrate", "Tracker"
     };
 
-    for (int i = 0; i < NROWS; i++) {
-        int ry = BODY_Y + i * rowH;
-        spr.drawFastHLine(0, ry, SCREEN_W, C(COL_BORDER));
+    for (int vi = 0; vi < visRows; vi++) {
+        int ri = g_menuScroll + vi;
+        if (ri >= MNU_NROWS) break;
+        int ry = BODY_Y + vi * MNU_ROW_H;
+        spr.drawFastHLine(0, ry, MNU_LIST_W, C(COL_BORDER));
 
-        // Label
-        spr.setFont(UI_FONT_12);
-        spr.setTextColor(C(COL_WHITE));
-        spr.setCursor(14, ry + 8);
-        spr.print(labels[i]);
-
-        // Arrow
-        spr.setFont(UI_FONT_12);
-        spr.setTextColor(C(COL_GREY));
-        spr.setCursor(SCREEN_W - 18, ry + 8);
-        spr.print(">");
+        if (ri != 2) {
+            // Sub-page row
+            int li = ri < 2 ? ri : ri - 1;
+            spr.setFont(UI_FONT_12);
+            spr.setTextColor(C(COL_WHITE));
+            spr.setCursor(14, ry + 8);
+            spr.print(labels[li]);
+            spr.setTextColor(C(COL_GREY));
+            spr.setCursor(MNU_LIST_W - 18, ry + 8);
+            spr.print(">");
+        } else {
+            // Row 2: ISS Jump inline toggle — greyed out when Grey Line screen is disabled
+            bool greyAvail = g_settings.screenEnabled[SCR_GREYLINE];
+            bool on        = greyAvail && g_settings.issJumpEnabled;
+            spr.setFont(UI_FONT_12);
+            spr.setTextColor(greyAvail ? C(COL_WHITE) : C(COL_GREY));
+            spr.setCursor(14, ry + 8);
+            spr.print("ISS Pass Alert");
+            if (greyAvail) {
+                spr.fillRoundRect(MNU_LIST_W - 76, ry + 5, 32, 18, 3, on ? C(COL_GREEN)  : C(COL_BORDER));
+                spr.drawRoundRect(MNU_LIST_W - 76, ry + 5, 32, 18, 3, C(COL_GREY));
+                spr.setTextColor(C(COL_WHITE));
+                spr.setCursor(MNU_LIST_W - 68, ry + 8);
+                spr.print("ON");
+                spr.fillRoundRect(MNU_LIST_W - 40, ry + 5, 36, 18, 3, on ? C(COL_BORDER) : C(COL_RED));
+                spr.drawRoundRect(MNU_LIST_W - 40, ry + 5, 36, 18, 3, C(COL_GREY));
+                spr.setCursor(MNU_LIST_W - 34, ry + 8);
+                spr.print("OFF");
+            } else {
+                spr.setTextColor(C(COL_GREY));
+                spr.setCursor(150, ry + 8);
+                spr.print("(Grey Line off)");
+            }
+        }
     }
-    spr.drawFastHLine(0, BODY_Y + NROWS * rowH, SCREEN_W, C(COL_BORDER));
+    spr.drawFastHLine(0, BODY_Y + min(visRows, MNU_NROWS) * MNU_ROW_H, MNU_LIST_W, C(COL_BORDER));
+
+    // ── Right-hand sidebar ────────────────────────────────────────────────────
+    const int sbX    = MNU_LIST_W;
+    const int upY    = BODY_Y;
+    const int dnY    = SCREEN_H - MNU_ARROW_H;
+    const int trackY0 = upY + MNU_ARROW_H + 3;
+    const int trackY1 = dnY - 3;
+    const int trackH  = max(1, trackY1 - trackY0);
+
+    spr.drawFastVLine(sbX, BODY_Y, SCREEN_H - BODY_Y, C(COL_BORDER));
+
+    // Up arrow
+    {
+        uint32_t col = (g_menuScroll > 0) ? COL_GREY_L : COL_BORDER;
+        spr.drawRect(sbX, upY, MNU_SB_W, MNU_ARROW_H, C(COL_BORDER));
+        int acx = sbX + MNU_SB_W / 2;
+        spr.fillTriangle(acx-5, upY+16, acx+5, upY+16, acx, upY+6, C(col));
+    }
+    // Down arrow
+    {
+        uint32_t col = (g_menuScroll < maxScroll) ? COL_GREY_L : COL_BORDER;
+        spr.drawRect(sbX, dnY, MNU_SB_W, MNU_ARROW_H, C(COL_BORDER));
+        int acx = sbX + MNU_SB_W / 2;
+        spr.fillTriangle(acx-5, dnY+6, acx+5, dnY+6, acx, dnY+16, C(col));
+    }
+    // Scroll thumb
+    {
+        int thumbH = max(12, trackH * visRows / MNU_NROWS);
+        int avail  = trackH - thumbH;
+        int thumbY = trackY0 + (maxScroll > 0 ? avail * g_menuScroll / maxScroll : 0);
+        spr.fillRoundRect(sbX + 5, thumbY, MNU_SB_W - 10, thumbH, 2, C(COL_GREY));
+    }
 }
 
 // ─── PAGE_LOCATION ────────────────────────────────────────────────────────────
@@ -489,6 +571,77 @@ static void cycleCallChar(char* cs, int pos, int dir) {
     cs[pos] = CALL_CHARS[idx];
 }
 
+// ─── PAGE_BRIGHTNESS ─────────────────────────────────────────────────────────
+static void drawBrightness() {
+    drawSubHeader("BRIGHTNESS");
+
+    const int SLX  = 14;                      // slider left edge
+    const int SLW  = SCREEN_W - SLX - 14;     // slider track width
+    const int SLY  = BODY_Y + 30;             // slider vertical centre
+    const int THW  = 14;                      // thumb width
+    const int THH  = 30;                      // thumb height
+
+    // Live drag: update brightness while finger is held on the slider
+    if (touchIsActive()) {
+        int32_t tx = touchCurrentX();
+        int32_t ty2 = touchCurrentY();
+        if (ty2 >= SLY - 20 && ty2 <= SLY + 20) {
+            int raw = (int)((float)(tx - SLX) / SLW * 255.0f + 0.5f);
+            g_settings.brightness = (uint8_t)constrain(raw, 10, 255);
+            tft.setBrightness(g_settings.brightness);
+        }
+    }
+
+    uint8_t bv = g_settings.brightness;
+    int pct    = (int)((bv * 100 + 127) / 255);
+    int thumbX = SLX + (int)((float)bv / 255.0f * (SLW - THW));
+
+    // Track background
+    spr.fillRoundRect(SLX, SLY - 4, SLW, 8, 4, C(COL_BORDER));
+    // Filled portion (left of thumb)
+    uint32_t fillCol = (pct >= 75) ? C(COL_GREEN) : (pct >= 40) ? C(COL_AMBER) : C(COL_RED);
+    spr.fillRoundRect(SLX, SLY - 4, thumbX - SLX + THW / 2, 8, 4, fillCol);
+    // Thumb
+    spr.fillRoundRect(thumbX, SLY - THH / 2, THW, THH, 4, C(COL_WHITE));
+    spr.drawRoundRect(thumbX, SLY - THH / 2, THW, THH, 4, C(COL_GREY));
+
+    // Percentage label
+    spr.setFont(UI_FONT_18);
+    spr.setTextColor(C(COL_WHITE));
+    char pbuf[8]; snprintf(pbuf, sizeof(pbuf), "%d%%", pct);
+    int pw = spr.textWidth(pbuf);
+    spr.setCursor((SCREEN_W - pw) / 2, SLY + 28);
+    spr.print(pbuf);
+
+    // Preset buttons: 25 / 50 / 75 / 100
+    static const uint8_t PRESETS[]  = { 64, 128, 191, 255 };
+    static const char*   PLABELS[]  = { "25%", "50%", "75%", "100%" };
+    const int PBW = 60, PBH = 26, PBY = SLY + 62;
+    int totalPW = 4 * PBW + 3 * 8;
+    int pbx = (SCREEN_W - totalPW) / 2;
+    for (int i = 0; i < 4; i++) {
+        bool active = (abs((int)bv - (int)PRESETS[i]) <= 2);
+        spr.fillRoundRect(pbx, PBY, PBW, PBH, 4,
+                          active ? C(COL_ORANGE_D) : C(COL_PANEL));
+        spr.drawRoundRect(pbx, PBY, PBW, PBH, 4,
+                          active ? C(COL_ORANGE) : C(COL_BORDER));
+        spr.setFont(UI_FONT_12);
+        spr.setTextColor(C(COL_WHITE));
+        int lw = spr.textWidth(PLABELS[i]);
+        spr.setCursor(pbx + (PBW - lw) / 2, PBY + 6);
+        spr.print(PLABELS[i]);
+        pbx += PBW + 8;
+    }
+
+    // Hint
+    spr.setFont(UI_FONT_9);
+    spr.setTextColor(C(COL_GREY));
+    const char* hint = "Drag slider or tap a preset";
+    int hw = spr.textWidth(hint);
+    spr.setCursor((SCREEN_W - hw) / 2, PBY + PBH + 10);
+    spr.print(hint);
+}
+
 // ─── PAGE_MODES ──────────────────────────────────────────────────────────────
 static const int MODE_NROWS = 6;
 static const uint8_t MODE_BITS[MODE_NROWS] = {
@@ -623,8 +776,9 @@ void drawScreenSettings() {
         case PAGE_SCREENS:    drawScreens();   break;
         case PAGE_TRACKER:    drawTracker();   break;
         case PAGE_CALLSIGN:   drawCallsign();  break;
-        case PAGE_MODES:      drawModes();     break;
-        case PAGE_TZ_DETECT:  drawTzDetect();  break;
+        case PAGE_MODES:       drawModes();       break;
+        case PAGE_TZ_DETECT:   drawTzDetect();   break;
+        case PAGE_BRIGHTNESS:  drawBrightness(); break;
         default: break;
     }
 }
@@ -680,29 +834,62 @@ bool settingsTouchUp(int32_t sx, int32_t sy,
 
     // ── MENU ──────────────────────────────────────────────────────────────────
     case PAGE_MENU:
-        if (!isTap) break;
         // Header: close button
-        if (sy < BODY_Y) {
+        if (isTap && sy < BODY_Y) {
             if (sx > SCREEN_W - 34) return true;   // X tapped
             break;
         }
+        // Sidebar: arrow taps and swipe scrolling
         {
-            int row = (sy - BODY_Y) / 28;
-            if (row >= 0 && row < 7) {
+            int visRows   = (SCREEN_H - BODY_Y) / MNU_ROW_H;
+            int maxScroll = max(0, MNU_NROWS - visRows);
+            bool startedInSidebar = (sx >= MNU_LIST_W);
+
+            if (isTap && startedInSidebar) {
+                // Arrow buttons
+                if (sy >= BODY_Y && sy < BODY_Y + MNU_ARROW_H)
+                    g_menuScroll = max(0, g_menuScroll - 1);
+                else if (sy >= SCREEN_H - MNU_ARROW_H)
+                    g_menuScroll = min(maxScroll, g_menuScroll + 1);
+                break;
+            }
+            if (!startedInSidebar && isSwipe) {
+                if (ey < sy) g_menuScroll = min(maxScroll, g_menuScroll + 1);
+                else         g_menuScroll = max(0,         g_menuScroll - 1);
+                break;
+            }
+            if (!isTap || startedInSidebar) break;
+            if (sx >= MNU_LIST_W) break;   // tap in sidebar but not arrow — ignore
+        }
+        // List row tap
+        {
+            int visRows = (SCREEN_H - BODY_Y) / MNU_ROW_H;
+            int vi  = (sy - BODY_Y) / MNU_ROW_H;
+            int ri  = g_menuScroll + vi;
+            if (vi < 0 || vi >= visRows || ri >= MNU_NROWS) break;
+
+            if (ri == 2) {
+                // ISS Pass Alert ON/OFF toggle — only if Grey Line screen is on
+                if (g_settings.screenEnabled[SCR_GREYLINE]) {
+                    g_settings.issJumpEnabled = (sx < MNU_LIST_W - 40);
+                    settingsSave();
+                }
+            } else {
                 strlcpy(g_editGrid, g_settings.grid, sizeof(g_editGrid));
-                switch (row) {
-                    case 0: g_page = PAGE_LOCATION; break;
-                    case 1: g_page = PAGE_TIMEZONE; break;
-                    case 2: g_page = PAGE_SCREENS;  g_scrScroll = 0; break;
-                    case 3: g_page = PAGE_TRACKER;  break;
-                    case 4:
+                switch (ri) {
+                    case 0: g_page = PAGE_BRIGHTNESS; break;
+                    case 1:
                         memset(g_editCall, ' ', 6); g_editCall[6] = '\0';
                         { int cl = (int)strlen(g_settings.callsign); if (cl > 6) cl = 6;
                           for (int i = 0; i < cl; i++) g_editCall[i] = g_settings.callsign[i]; }
                         g_page = PAGE_CALLSIGN;
                         break;
-                    case 5: g_page = PAGE_MODES; break;
-                    case 6: g_page = PAGE_CALIBRATE; break;
+                    case 3: g_page = PAGE_LOCATION; break;
+                    case 4: g_page = PAGE_MODES; break;
+                    case 5: g_page = PAGE_SCREENS;  g_scrScroll = 0; break;
+                    case 6: g_page = PAGE_TIMEZONE; break;
+                    case 7: g_page = PAGE_CALIBRATE; break;
+                    case 8: g_page = PAGE_TRACKER;  break;
                 }
             }
         }
@@ -923,6 +1110,35 @@ bool settingsTouchUp(int32_t sx, int32_t sy,
             if (row >= 0 && row < MODE_NROWS && sx >= SCREEN_W - 58) {
                 g_settings.modeFilter ^= MODE_BITS[row];
                 settingsSave();
+            }
+        }
+        break;
+
+    // ── BRIGHTNESS ───────────────────────────────────────────────────────────
+    case PAGE_BRIGHTNESS:
+        if (isTap && sy < BODY_Y && sx < 40) {
+            settingsSave();
+            g_page = PAGE_MENU;
+            break;
+        }
+        if (!isTap) break;
+        {
+            // Preset button tap?
+            const int SLY  = BODY_Y + 30;
+            const int PBW = 60, PBH = 26, PBY = SLY + 62;
+            int totalPW = 4 * PBW + 3 * 8;
+            int pbx = (SCREEN_W - totalPW) / 2;
+            static const uint8_t PRESETS[] = { 64, 128, 191, 255 };
+            if (sy >= PBY && sy < PBY + PBH) {
+                for (int i = 0; i < 4; i++) {
+                    if (sx >= pbx && sx < pbx + PBW) {
+                        g_settings.brightness = PRESETS[i];
+                        tft.setBrightness(g_settings.brightness);
+                        settingsSave();
+                        break;
+                    }
+                    pbx += PBW + 8;
+                }
             }
         }
         break;

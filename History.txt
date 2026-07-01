@@ -1,6 +1,83 @@
 CYD Dashboard — Version History
 ================================
 
+1.17.012  2026-07-01
+  [Fix] Settings menu rows are now in alphabetical order: Brightness,
+        Callsign, ISS Pass Alert, Location, Mode Filter, Screens,
+        Timezone, Touch Calibrate, Tracker.
+
+1.17.011  2026-07-01
+  [Fix] Settings menu "ISS Pass Alert" row is now greyed out and
+        non-interactive when the Grey Line screen is disabled in
+        Settings > Screens. The row shows "(Grey Line off)" in place of
+        the ON/OFF buttons and ignores taps. The toggle becomes active
+        again as soon as the Grey Line screen is re-enabled.
+
+1.17.010  2026-07-01
+  [Feature] Settings menu now has a sidebar scrollbar (up/down arrows +
+            proportional drag thumb) matching the Timezone and Screens
+            pages. All 9 menu rows are reachable; row height is unchanged
+            at 28px. Swipe up/down also scrolls the list.
+
+1.17.009  2026-07-01
+  [Feature] Brightness control in Settings > Brightness. A draggable
+            slider lets you set the backlight level from dim to full;
+            four preset buttons (25% / 50% / 75% / 100%) allow quick
+            selection. The change takes effect immediately on drag and
+            is saved to flash when you tap back. Lower brightness
+            reduces backlight power draw which may help with flickering
+            on USB-powered boards. Setting is persisted and applied on
+            boot (replaces the previous hardcoded value of 210).
+
+1.17.008  2026-07-01
+  [Feature] Tapping the WiFi signal bars in the status bar shows an info
+            overlay with the access point SSID, IP address, MAC address,
+            and signal strength in dBm with a small bar graphic. Tap
+            anywhere to dismiss. The overlay appears on top of whichever
+            screen is currently displayed.
+
+1.17.007  2026-07-01
+  [Feature] HF Conditions screen: tap any index tile (SFI, SSN, A, K, or
+            X-Ray) to show an info overlay explaining what the value means,
+            its full range, the ideal value, and its effect on HF radio
+            signals. Auto-scroll pauses while the overlay is visible. Tap
+            anywhere to dismiss.
+
+1.17.006  2026-07-01
+  [Fix] Grey Line ISS pass box no longer shows the confusing "ISS pass
+        data unavailable" message. The pass scan window has been extended
+        from 3 orbits (~4.7 h) to 5 days. When the next pass is more than
+        24 hours away a compact single line is shown instead of the full
+        box: "Next ISS pass: Thu 03 Jul  14:23". The full detail box
+        (times, bearings, duration, max elevation) only appears when the
+        pass is within 24 hours or already in progress.
+
+1.17.005  2026-07-01
+  [Feature] "ISS Pass Alert" setting (Settings menu, inline ON/OFF toggle,
+            default ON). When enabled, the dashboard automatically jumps to
+            the Grey Line screen the moment the ISS rises above 5° from
+            the QTH and holds there for the duration of the pass. When the
+            ISS sets again, normal auto-scroll resumes. Pressing the
+            Play/Pause button during a pass exits the hold immediately and
+            resumes auto-play rather than toggling pause as normal.
+
+1.17.004  2026-07-01
+  [Feature] Grey Line screen now shows a "Next ISS Pass" info box in the
+            bottom-left corner. Uses the same analytical orbital model as
+            the ground-track to scan forward up to 3 orbits and find the
+            next time the ISS rises above 5° elevation from the QTH.
+            Displays: rise and set time (local), rise and set bearing
+            (compass + degrees), pass duration, and peak elevation.
+            When the ISS is currently above the horizon the box turns
+            green and reads "ISS VISIBLE NOW" with set time instead.
+
+1.17.003  2026-07-01
+  [Feature] Clock screen moon now uses a real moon photograph (41×41 px
+            RGB565 texture from PROGMEM) masked with the same phase
+            illumination model. The lit half shows actual lunar surface
+            detail; the unlit half remains dark. Source image:
+            FullMoon2010.jpg (Wikimedia Commons, CC BY-SA 2.5).
+
 1.17.002  2026-06-30
   [Feature] Settings > Screens now has the same right-hand sidebar as
             Timezone — page-up/page-down arrows and a draggable scroll
