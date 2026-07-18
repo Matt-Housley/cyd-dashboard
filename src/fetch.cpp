@@ -373,7 +373,8 @@ static const char* dayAbbr(int wday) {
 // http.getString() de-chunks automatically — use that instead.
 void fetchWeather() {
     char url[420];
-    // HTTPS — open-meteo supports it and it is more reliable than their HTTP endpoint.
+    // Always fetch in °C and mph — unit conversion to °F / km/h is done at display time
+    // so toggling units takes effect instantly without waiting for a re-fetch.
     snprintf(url, sizeof(url),
         "https://api.open-meteo.com/v1/forecast"
         "?latitude=%.4f&longitude=%.4f"

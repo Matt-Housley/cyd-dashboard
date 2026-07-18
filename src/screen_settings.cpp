@@ -113,7 +113,7 @@ static const int MNU_SB_W    = 22;
 static const int MNU_ARROW_H = 22;
 static const int MNU_LIST_W  = SCREEN_W - MNU_SB_W;
 static const int MNU_ROW_H   = 28;
-static const int MNU_NROWS   = 9;   // 8 sub-page rows + 1 inline toggle
+static const int MNU_NROWS   = 11;  // 8 sub-page rows + 3 inline toggles
 
 static void drawMenu() {
     // Header
@@ -145,11 +145,31 @@ static void drawMenu() {
         }
     }
 
-    // Alphabetical order: ri 0,1 then toggle at 2, then ri 3-8 sub-pages
-    // Sub-page labels indexed by li = ri < 2 ? ri : ri - 1
+    // Alphabetical row order (11 rows):
+    //  0 Brightness  1 Callsign  2 Distance Units  3 ISS Pass Alert
+    //  4 Location    5 Mode Filter  6 Screens  7 Temperature Units
+    //  8 Timezone    9 Touch Calibrate  10 Tracker
+    // Rows 2, 3, 7 are inline toggles; the rest navigate to a sub-page.
+    // Sub-page label index: li = ri < 2 ? ri : (ri < 4 ? -1 : (ri < 7 ? ri-2 : (ri==7 ? -1 : ri-3)))
     static const char* labels[8] = {
         "Brightness", "Callsign", "Location", "Mode Filter",
         "Screens", "Timezone", "Touch Calibrate", "Tracker"
+    };
+
+    // Helper to draw a two-option selector button pair
+    // left button highlighted green when leftSel==true, right highlighted green otherwise
+    auto drawSelector = [&](int bx, int ry, const char* leftLbl, const char* rightLbl, bool leftSel) {
+        int lw = spr.textWidth(leftLbl)  + 12;
+        int rw = spr.textWidth(rightLbl) + 12;
+        spr.fillRoundRect(bx,      ry + 5, lw, 18, 3,  leftSel ? C(COL_GREEN)  : C(COL_BORDER));
+        spr.drawRoundRect(bx,      ry + 5, lw, 18, 3,  C(COL_GREY));
+        spr.setTextColor(C(COL_WHITE));
+        spr.setCursor(bx + 6, ry + 8);
+        spr.print(leftLbl);
+        spr.fillRoundRect(bx + lw + 4, ry + 5, rw, 18, 3, leftSel ? C(COL_BORDER) : C(COL_GREEN));
+        spr.drawRoundRect(bx + lw + 4, ry + 5, rw, 18, 3, C(COL_GREY));
+        spr.setCursor(bx + lw + 10, ry + 8);
+        spr.print(rightLbl);
     };
 
     for (int vi = 0; vi < visRows; vi++) {
@@ -157,22 +177,19 @@ static void drawMenu() {
         if (ri >= MNU_NROWS) break;
         int ry = BODY_Y + vi * MNU_ROW_H;
         spr.drawFastHLine(0, ry, MNU_LIST_W, C(COL_BORDER));
+        spr.setFont(UI_FONT_12);
 
-        if (ri != 2) {
-            // Sub-page row
-            int li = ri < 2 ? ri : ri - 1;
-            spr.setFont(UI_FONT_12);
+        if (ri == 2) {
+            // Distance Units: [mi] [km]
             spr.setTextColor(C(COL_WHITE));
             spr.setCursor(14, ry + 8);
-            spr.print(labels[li]);
-            spr.setTextColor(C(COL_GREY));
-            spr.setCursor(MNU_LIST_W - 18, ry + 8);
-            spr.print(">");
-        } else {
-            // Row 2: ISS Jump inline toggle — greyed out when Grey Line screen is disabled
+            spr.print("Distance Units");
+            drawSelector(MNU_LIST_W - 88, ry, "mi", "km", !g_settings.useKm);
+
+        } else if (ri == 3) {
+            // ISS Pass Alert — greyed out when Grey Line screen is disabled
             bool greyAvail = g_settings.screenEnabled[SCR_GREYLINE];
             bool on        = greyAvail && g_settings.issJumpEnabled;
-            spr.setFont(UI_FONT_12);
             spr.setTextColor(greyAvail ? C(COL_WHITE) : C(COL_GREY));
             spr.setCursor(14, ry + 8);
             spr.print("ISS Pass Alert");
@@ -191,6 +208,23 @@ static void drawMenu() {
                 spr.setCursor(150, ry + 8);
                 spr.print("(Grey Line off)");
             }
+
+        } else if (ri == 7) {
+            // Temperature Units: [°C] [°F]
+            spr.setTextColor(C(COL_WHITE));
+            spr.setCursor(14, ry + 8);
+            spr.print("Temperature");
+            drawSelector(MNU_LIST_W - 80, ry, "C", "F", g_settings.useCelsius);
+
+        } else {
+            // Sub-page navigation row
+            int li = ri < 2 ? ri : (ri < 7 ? ri - 2 : ri - 3);
+            spr.setTextColor(C(COL_WHITE));
+            spr.setCursor(14, ry + 8);
+            spr.print(labels[li]);
+            spr.setTextColor(C(COL_GREY));
+            spr.setCursor(MNU_LIST_W - 18, ry + 8);
+            spr.print(">");
         }
     }
     spr.drawFastHLine(0, BODY_Y + min(visRows, MNU_NROWS) * MNU_ROW_H, MNU_LIST_W, C(COL_BORDER));
@@ -869,9 +903,25 @@ bool settingsTouchUp(int32_t sx, int32_t sy,
             if (vi < 0 || vi >= visRows || ri >= MNU_NROWS) break;
 
             if (ri == 2) {
+                // Distance Units: [mi] left button | [km] right button
+                // Buttons drawn starting at MNU_LIST_W-88; boundary between them ≈ MNU_LIST_W-60
+                bool nowKm = (sx >= MNU_LIST_W - 60);
+                if (nowKm != g_settings.useKm) {
+                    g_settings.useKm = nowKm;
+                    settingsSave();
+                }
+            } else if (ri == 3) {
                 // ISS Pass Alert ON/OFF toggle — only if Grey Line screen is on
                 if (g_settings.screenEnabled[SCR_GREYLINE]) {
                     g_settings.issJumpEnabled = (sx < MNU_LIST_W - 40);
+                    settingsSave();
+                }
+            } else if (ri == 7) {
+                // Temperature: [C] left button | [F] right button
+                // Buttons drawn starting at MNU_LIST_W-80; boundary between them ≈ MNU_LIST_W-60
+                bool nowCelsius = (sx < MNU_LIST_W - 60);
+                if (nowCelsius != g_settings.useCelsius) {
+                    g_settings.useCelsius = nowCelsius;
                     settingsSave();
                 }
             } else {
@@ -884,12 +934,12 @@ bool settingsTouchUp(int32_t sx, int32_t sy,
                           for (int i = 0; i < cl; i++) g_editCall[i] = g_settings.callsign[i]; }
                         g_page = PAGE_CALLSIGN;
                         break;
-                    case 3: g_page = PAGE_LOCATION; break;
-                    case 4: g_page = PAGE_MODES; break;
-                    case 5: g_page = PAGE_SCREENS;  g_scrScroll = 0; break;
-                    case 6: g_page = PAGE_TIMEZONE; break;
-                    case 7: g_page = PAGE_CALIBRATE; break;
-                    case 8: g_page = PAGE_TRACKER;  break;
+                    case 4: g_page = PAGE_LOCATION; break;
+                    case 5: g_page = PAGE_MODES; break;
+                    case 6: g_page = PAGE_SCREENS;  g_scrScroll = 0; break;
+                    case 8: g_page = PAGE_TIMEZONE; break;
+                    case 9: g_page = PAGE_CALIBRATE; break;
+                    case 10: g_page = PAGE_TRACKER;  break;
                 }
             }
         }

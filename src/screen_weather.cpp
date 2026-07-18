@@ -2,6 +2,7 @@
 #include "ui_common.h"
 #include "config.h"
 #include "data_store.h"
+#include "settings.h"
 #include <math.h>
 #include "fonts/ui_fonts.h"
 
@@ -192,7 +193,8 @@ void drawScreenWeather() {
     const int tempTop = STATUS_H + ((y + 48 - STATUS_H) - 36) / 2;
 
     char tbuf[8];
-    snprintf(tbuf, sizeof(tbuf), "%d", (int)wd.temp);
+    float dispTemp = g_settings.useCelsius ? wd.temp : wd.temp * 9.0f / 5.0f + 32.0f;
+    snprintf(tbuf, sizeof(tbuf), "%d", (int)dispTemp);
 
     spr.setFont(UI_FONT_40);
     spr.setTextColor(C(COL_WHITE));
@@ -200,14 +202,14 @@ void drawScreenWeather() {
     spr.setCursor(6, tempTop);
     spr.print(tbuf);
 
-    // Degree circle + "C"
+    // Degree circle + "C" or "F"
     int degX = 6 + tempW + 6;
     int degY = tempTop + 10;
     spr.drawCircle(degX, degY, 3, C(COL_GREY_L));
     spr.setFont(UI_FONT_18);
     spr.setTextColor(C(COL_GREY_L));
     spr.setCursor(degX + 7, tempTop + 8);
-    spr.print("C");
+    spr.print(g_settings.useCelsius ? "C" : "F");
 
     // ── Current condition label ───────────────────────────────────────────────
     spr.setFont(UI_FONT_12);
@@ -222,7 +224,8 @@ void drawScreenWeather() {
     spr.setCursor(rx, y + 6);
     spr.printf("Hum: %d%%", wd.humidity);
     spr.setCursor(rx, y + 20);
-    spr.printf("Wind: %d mph", wd.windMph);
+    int dispWind = g_settings.useKm ? (int)(wd.windMph * 1.60934f + 0.5f) : wd.windMph;
+    spr.printf("Wind: %d %s", dispWind, g_settings.useKm ? "km/h" : "mph");
     spr.setTextColor(C(COL_AMBER));
     spr.setCursor(rx, y + 34);
     spr.printf("Rain: %s", wd.rainIn);
@@ -299,11 +302,12 @@ void drawScreenWeather() {
         // Weather icon centred in tile (animated)
         drawWeatherIcon(cx + (colW - 2) / 2, y + 24, 10, d.code, t);
 
-        // Max temp
+        // Max temp (convert from stored °C)
+        int dispMaxT = g_settings.useCelsius ? d.maxT : (int)(d.maxT * 9.0f / 5.0f + 32.0f);
         spr.setFont(UI_FONT_9);
         spr.setTextColor(C(COL_WHITE));
         char maxbuf[8];
-        snprintf(maxbuf, sizeof(maxbuf), "%d", d.maxT);
+        snprintf(maxbuf, sizeof(maxbuf), "%d", dispMaxT);
         int mw   = spr.textWidth(maxbuf) + 5;   // +5 for degree circle
         int mxOff = cx + (colW - 2 - mw) / 2;
         spr.setCursor(mxOff, y + 37);
@@ -329,11 +333,12 @@ void drawScreenWeather() {
                           (d.maxT >= 10) ? COL_AMBER  : COL_BLUE;
         spr.fillRect(bx, fTop, barW, fH, C(barCol));
 
-        // Min temp  (moved up 8 px to make room for wind row)
+        // Min temp (convert from stored °C)
+        int dispMinT = g_settings.useCelsius ? d.minT : (int)(d.minT * 9.0f / 5.0f + 32.0f);
         spr.setFont(UI_FONT_9);
         spr.setTextColor(C(COL_GREY));
         char minbuf[8];
-        snprintf(minbuf, sizeof(minbuf), "%d", d.minT);
+        snprintf(minbuf, sizeof(minbuf), "%d", dispMinT);
         int mnw   = spr.textWidth(minbuf) + 5;
         int mnOff = cx + (colW - 2 - mnw) / 2;
         spr.setCursor(mnOff, y + 102);
@@ -361,7 +366,8 @@ void drawScreenWeather() {
             const int windCY    = windTextY + 6;    // vertical centre for arrow
 
             char wsBuf[6];
-            snprintf(wsBuf, sizeof(wsBuf), "%d", d.windMph);
+            int tileWind = g_settings.useKm ? (int)(d.windMph * 1.60934f + 0.5f) : d.windMph;
+            snprintf(wsBuf, sizeof(wsBuf), "%d", tileWind);
             int speedW  = spr.textWidth(wsBuf);
             int groupW  = 17 + 3 + speedW;          // arrow(17) + gap(3) + speed
             int leftX   = cx + (colW - 2 - groupW) / 2;

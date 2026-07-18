@@ -114,15 +114,18 @@ void drawScreenSOTA() {
         spr.print(s.summit);
         int refW = spr.textWidth(s.summit);
 
-        // Distance in miles when known, else UTC time
+        // Distance when known, else UTC time
         char rbuf[14];
         if (s.dist_km > 0) {
-            int miles = (int)(s.dist_km * 0.621371f + 0.5f);
-            if (miles >= 1000)
-                snprintf(rbuf, sizeof(rbuf), "%d,%03dmi",
-                         miles / 1000, miles % 1000);
-            else
-                snprintf(rbuf, sizeof(rbuf), "%dmi", miles);
+            if (g_settings.useKm) {
+                int km = (int)(s.dist_km + 0.5f);
+                if (km >= 1000) snprintf(rbuf, sizeof(rbuf), "%d,%03dkm", km / 1000, km % 1000);
+                else            snprintf(rbuf, sizeof(rbuf), "%dkm", km);
+            } else {
+                int miles = (int)(s.dist_km * 0.621371f + 0.5f);
+                if (miles >= 1000) snprintf(rbuf, sizeof(rbuf), "%d,%03dmi", miles / 1000, miles % 1000);
+                else               snprintf(rbuf, sizeof(rbuf), "%dmi", miles);
+            }
         } else {
             strlcpy(rbuf, s.time, sizeof(rbuf));
         }

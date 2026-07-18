@@ -305,8 +305,12 @@ void drawScreenPSKReporter() {
         const PSKReport& rf = ds.reports[iFar];
         const char* band = pskBandName(rf.freqMHz);
         char farBuf[48];
-        snprintf(farBuf, sizeof(farBuf), "%s %s %dmi",
-                 rf.call, band ? band : "?", (int)(maxDist * 0.621371f));
+        if (g_settings.useKm)
+            snprintf(farBuf, sizeof(farBuf), "%s %s %dkm",
+                     rf.call, band ? band : "?", (int)(maxDist + 0.5f));
+        else
+            snprintf(farBuf, sizeof(farBuf), "%s %s %dmi",
+                     rf.call, band ? band : "?", (int)(maxDist * 0.621371f + 0.5f));
         spr.setFont(UI_FONT_12);
         spr.setTextColor(C(COL_ORANGE));
         spr.setCursor(4, SCREEN_H - 14);
@@ -336,9 +340,14 @@ void drawScreenPSKReporter() {
             snprintf(line1, sizeof(line1), "%s", r.call);
             snprintf(line2, sizeof(line2), "%s  %s  SNR %ddB",
                      r.grid, band ? band : "?", r.snr);
-            snprintf(line3, sizeof(line3), "%d mi  %s",
-                     (int)(dist * 0.621371f),
-                     s_pskSelected == 0 ? "FURTHEST" : "LOUDEST");
+            if (g_settings.useKm)
+                snprintf(line3, sizeof(line3), "%d km  %s",
+                         (int)(dist + 0.5f),
+                         s_pskSelected == 0 ? "FURTHEST" : "LOUDEST");
+            else
+                snprintf(line3, sizeof(line3), "%d mi  %s",
+                         (int)(dist * 0.621371f + 0.5f),
+                         s_pskSelected == 0 ? "FURTHEST" : "LOUDEST");
 
             spr.setFont(UI_FONT_9);
             int w1 = spr.textWidth(line1);

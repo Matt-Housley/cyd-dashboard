@@ -1,6 +1,34 @@
 CYD Dashboard — Version History
 ================================
 
+1.17.015  2026-07-18
+  [Fix] Distance Units and Temperature toggles could not be switched back
+        once changed. The tap boundary was incorrectly set to the screen
+        midpoint (x=149) rather than between the drawn buttons (x≈238),
+        so tapping either button always registered as the right-hand
+        choice. Fixed by using a threshold that sits between the two
+        rendered button positions.
+
+1.17.014  2026-07-18
+  [Fix] Temperature and distance unit changes now take effect instantly
+        without waiting for a weather re-fetch. Weather data is always
+        fetched in °C and mph; conversion to °F and km/h is applied at
+        draw time for the current temperature, 7-day max/min values, and
+        per-tile wind speeds. Distance screens (DX/POTA/SOTA/PSK) already
+        converted at draw time so were unaffected.
+
+1.17.013  2026-07-18
+  [Feature] Temperature and distance units are now user-configurable.
+            Settings menu has two new inline selectors:
+            "Distance Units" (mi / km) and "Temperature" (C / F).
+            Changing temperature or distance units triggers an immediate
+            weather re-fetch so the new unit is served directly by the
+            Open-Meteo API. Affected screens:
+            - Weather: current and 7-day temperatures, wind speed label
+              (mph / km/h), and bar colour thresholds
+            - DX Spots, POTA Spots, SOTA Spots: spotter and DX distances
+            - PSK Reporter: furthest-station label and tap overlay
+
 1.17.012  2026-07-01
   [Fix] Settings menu rows are now in alphabetical order: Brightness,
         Callsign, ISS Pass Alert, Location, Mode Filter, Screens,

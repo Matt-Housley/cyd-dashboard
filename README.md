@@ -159,6 +159,7 @@ The status bar sits at the top of every screen:
 - **Automatic timezone detection** — saving a new grid locator in Settings > Location triggers a background lookup (via Open-Meteo's timezone resolver) that matches your coordinates to the correct timezone and applies it automatically; falls back to a manual prompt if no match is found
 - **Live location updates** — changing the grid locator immediately resets the Weather screen to its loading state and forces a fresh fetch for the new coordinates, rather than showing stale data for the old location
 - **Screen brightness control** — Settings > Brightness provides a draggable slider and four quick-select presets (25% / 50% / 75% / 100%). The change takes effect immediately and is saved to flash. Reducing brightness can help with flickering on USB-powered boards
+- **Unit preferences** — Settings > Distance Units (mi / km) and Temperature (C / F) are independent toggles. Distance Units also controls wind speed (mph / km/h) on the Weather screen. Changing either setting triggers an immediate weather re-fetch so the Open-Meteo API returns data in the correct unit. Distances on DX Spots, POTA Spots, SOTA Spots, and PSK Reporter convert at display time with no re-fetch needed
 - **PSK Reporter** — animated pulsing markers for your furthest and loudest reception spots, with a tap-to-inspect overlay showing callsign, country, grid, band, SNR, and distance; the map auto-zooms to fit your QTH and all current spots while preserving correct aspect ratio (letterboxed if needed)
 - **Mode filter** — filter DX, POTA, and SOTA spots by mode (CW, Voice, FT8, FT4, Digital, Other) from Settings > Mode Filter
 - **Contest detail** — tap any contest to fetch mode, bands, and exchange requirements from contestcalendar.com, with word-wrapping for long exchange formats and a clear error state if the lookup fails
@@ -200,10 +201,12 @@ Tap the ☰ menu icon at the right of the status bar to open on-device settings.
 
 - **Brightness** — drag slider or use presets to set backlight level; takes effect immediately
 - **Callsign** — your amateur radio callsign (used for PSK Reporter)
+- **Distance Units** — mi or km; also controls wind speed units (mph / km/h) on the Weather screen
 - **ISS Pass Alert** — auto-jump to Grey Line when the ISS is visible from your QTH (only shown when the Grey Line screen is enabled)
 - **Location** — 6-character Maidenhead grid locator (used for distance calculations, map position, and weather). Saving a new grid automatically detects and applies the correct timezone
 - **Mode Filter** — toggle CW, Voice, FT8, FT4, Digital, and Other modes for the DX/POTA/SOTA spot screens
 - **Screens** — enable/disable individual screens
+- **Temperature** — C or F; independent of Distance Units
 - **Timezone** — select from 22 common timezones, or let Location auto-detect it for you
 - **Touch Calibrate** — run if touches don't line up with what's displayed
 - **Tracker** — choose stock/crypto symbol and chart range (1–5 years)

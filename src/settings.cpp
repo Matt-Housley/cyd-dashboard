@@ -149,6 +149,8 @@ static void applyDefaults(AppSettings& s) {
     memset(s.touchCal, 0, sizeof(s.touchCal));
     s.issJumpEnabled = true;
     s.brightness     = 200;
+    s.useCelsius     = true;
+    s.useKm          = false;
 }
 
 // ─── Load ─────────────────────────────────────────────────────────────────────
@@ -187,6 +189,8 @@ void settingsLoad() {
     g_settings.modeFilter =          doc["modes"]    | (int)SPOT_MODE_ALL;
     g_settings.issJumpEnabled =      doc["issJump"]   | true;
     g_settings.brightness     = (uint8_t)(doc["bright"] | 200);
+    g_settings.useCelsius     =      doc["celsius"]  | true;
+    g_settings.useKm          =      doc["useKm"]    | false;
 
     JsonArray tc = doc["tcal"].as<JsonArray>();
     if (tc.size() == 8) {
@@ -225,6 +229,8 @@ void settingsSave() {
     doc["modes"]   = g_settings.modeFilter;
     doc["issJump"] = g_settings.issJumpEnabled;
     doc["bright"]  = g_settings.brightness;
+    doc["celsius"] = g_settings.useCelsius;
+    doc["useKm"]   = g_settings.useKm;
 
     JsonArray en = doc["screens"].to<JsonArray>();
     for (int i = 0; i < NUM_SCREENS; i++) en.add(g_settings.screenEnabled[i]);

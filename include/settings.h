@@ -52,6 +52,8 @@ struct AppSettings {
     uint16_t touchCal[8];                 // LovyanGFX calibration parameters
     bool     issJumpEnabled;              // jump to Grey Line screen during ISS passes
     uint8_t  brightness;                  // backlight level 0-255
+    bool     useCelsius;                  // true = °C, false = °F
+    bool     useKm;                       // true = km / km/h, false = miles / mph
 };
 
 // Classify a mode string into a MODE_* bit

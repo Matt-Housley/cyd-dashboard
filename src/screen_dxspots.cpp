@@ -301,14 +301,24 @@ void drawScreenDXSpots() {
         if (cty[0]) {
             char ctyBuf[36];
             if (s.dx_dist_km > 0 && s.dx_bearing != 0xFFFF) {
-                int miles = (int)(s.dx_dist_km * 0.621371f + 0.5f);
                 const char* dir = compassPt(s.dx_bearing);
-                if (miles >= 1000)
-                    snprintf(ctyBuf, sizeof(ctyBuf), "(%s %d,%03dmi %s)",
-                             cty, miles / 1000, miles % 1000, dir);
-                else
-                    snprintf(ctyBuf, sizeof(ctyBuf), "(%s %dmi %s)",
-                             cty, miles, dir);
+                if (g_settings.useKm) {
+                    int km = (int)(s.dx_dist_km + 0.5f);
+                    if (km >= 1000)
+                        snprintf(ctyBuf, sizeof(ctyBuf), "(%s %d,%03dkm %s)",
+                                 cty, km / 1000, km % 1000, dir);
+                    else
+                        snprintf(ctyBuf, sizeof(ctyBuf), "(%s %dkm %s)",
+                                 cty, km, dir);
+                } else {
+                    int miles = (int)(s.dx_dist_km * 0.621371f + 0.5f);
+                    if (miles >= 1000)
+                        snprintf(ctyBuf, sizeof(ctyBuf), "(%s %d,%03dmi %s)",
+                                 cty, miles / 1000, miles % 1000, dir);
+                    else
+                        snprintf(ctyBuf, sizeof(ctyBuf), "(%s %dmi %s)",
+                                 cty, miles, dir);
+                }
             } else {
                 snprintf(ctyBuf, sizeof(ctyBuf), "(%s)", cty);
             }
@@ -337,15 +347,18 @@ void drawScreenDXSpots() {
         spr.setCursor(8, ry + 27);
         spr.print(spBuf);
 
-        // Right: distance in miles when known, else UTC time
+        // Right: distance when known, else UTC time
         char rbuf[14];
         if (s.dist_km > 0) {
-            int miles = (int)(s.dist_km * 0.621371f + 0.5f);
-            if (miles >= 1000)
-                snprintf(rbuf, sizeof(rbuf), "%d,%03dmi",
-                         miles / 1000, miles % 1000);
-            else
-                snprintf(rbuf, sizeof(rbuf), "%dmi", miles);
+            if (g_settings.useKm) {
+                int km = (int)(s.dist_km + 0.5f);
+                if (km >= 1000) snprintf(rbuf, sizeof(rbuf), "%d,%03dkm", km / 1000, km % 1000);
+                else            snprintf(rbuf, sizeof(rbuf), "%dkm", km);
+            } else {
+                int miles = (int)(s.dist_km * 0.621371f + 0.5f);
+                if (miles >= 1000) snprintf(rbuf, sizeof(rbuf), "%d,%03dmi", miles / 1000, miles % 1000);
+                else               snprintf(rbuf, sizeof(rbuf), "%dmi", miles);
+            }
         } else {
             strlcpy(rbuf, s.time, sizeof(rbuf));
         }
