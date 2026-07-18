@@ -41,9 +41,98 @@ The dashboard cycles through 13 screens, each auto-refreshing on its own schedul
 
 ## Hardware
 
-- **Board:** ESP32-2432S028 "Cheap Yellow Display" (ESP32 + 2.8" 320x240 ILI9341 + XPT2046 touch)
+- **Board:** ESP32-2432S028 "Cheap Yellow Display" (ESP32 + 2.8" 320×240 ILI9341 + XPT2046 touch)
 - **Flash:** 4 MB (custom partition: 1.875 MB app + 2 MB SPIFFS, no OTA)
 - **Power:** USB — the board draws up to ~400 mA during WiFi transmit
+
+## Display Compatibility
+
+The "Cheap Yellow Display" name covers several board variants with different display and touch controllers. The firmware is configured for the most common variant (ESP32-2432S028 with ILI9341 + XPT2046), but adapting it to other variants only requires editing `include/lgfx_config.h`.
+
+### Step 1 — Identify your chips
+
+There are two chips to identify:
+
+**Display controller** — look at the small IC nearest the flat-flex ribbon cable connector on the back of the board. The most common markings are:
+- `ILI9341` — 2.8" 320×240, the most common CYD display (used on this board)
+- `ST7789` — found on some 2.4" and 2.8" variants
+- `ILI9488` — 3.5" 320×480 variants
+
+**Touch controller** — look at the small IC on the *front* of the PCB (the side with the USB connector). The part number is usually laser-engraved on the top of the chip:
+- `XPT2046` or `ADS7846` — resistive touch, the most common CYD touch chip
+- `GT911` — capacitive touch (glass surface, no pressure needed)
+- `CST816S` — capacitive touch, found on some newer variants
+- `FT5206` / `FT5x06` — capacitive touch, less common
+
+### Step 2 — Match your chips to LovyanGFX driver classes
+
+Open `include/lgfx_config.h` and change the four class declarations near the top of the `LGFX` class to match your hardware:
+
+| Chip found on board | LovyanGFX class to use |
+|---|---|
+| ILI9341 (display) | `lgfx::Panel_ILI9341` |
+| ST7789 (display) | `lgfx::Panel_ST7789` |
+| ILI9488 (display) | `lgfx::Panel_ILI9488` |
+| XPT2046 / ADS7846 (touch) | `lgfx::Touch_XPT2046` |
+| GT911 (touch) | `lgfx::Touch_GT911` |
+| CST816S (touch) | `lgfx::Touch_CST816S` |
+| FT5206 / FT5x06 (touch) | `lgfx::Touch_FT5x06` |
+
+The lines to change in `lgfx_config.h` are:
+
+```cpp
+lgfx::Panel_ILI9341  _panel_instance;   // ← change to match your display chip
+lgfx::Touch_XPT2046  _touch_instance;   // ← change to match your touch chip
+```
+
+### Step 3 — Check the pin assignments
+
+Most 2.8" CYD boards share the same wiring, but verify against the table below if your display is blank or your touch doesn't respond:
+
+| Signal | Pin (standard CYD28) | Notes |
+|--------|----------------------|-------|
+| Display SCLK | 14 | HSPI |
+| Display MOSI | 13 | HSPI |
+| Display MISO | 12 | HSPI |
+| Display DC | 2 | Data/Command select |
+| Display CS | 15 | |
+| Backlight | 21 | PWM via `Light_PWM` |
+| Touch SCLK | 25 | VSPI |
+| Touch MOSI | 32 | VSPI |
+| Touch MISO | 39 | VSPI (input-only GPIO) |
+| Touch CS | 33 | |
+| Touch IRQ | 36 | Input-only GPIO |
+
+If your board has different silkscreen labels, update the `cfg.pin_*` lines in the `_bus_instance` and `_touch_instance` config blocks accordingly.
+
+> **Capacitive touch (GT911, CST816S, FT5x06):** these use I²C rather than SPI. Replace the `spi_host`, `pin_sclk`, `pin_mosi`, `pin_miso`, and `pin_cs` lines with:
+> ```cpp
+> cfg.i2c_port = 0;
+> cfg.pin_sda  = 33;   // check your board's silkscreen
+> cfg.pin_scl  = 32;
+> cfg.i2c_addr = 0x5D; // GT911: 0x5D or 0x14; CST816S: 0x15; FT5x06: 0x38
+> cfg.freq     = 400000;
+> ```
+
+### Step 4 — Fix display or touch orientation problems
+
+If the image is **upside-down or mirrored**, change `offset_rotation` in the panel config block:
+
+```cpp
+cfg.offset_rotation = 0;  // try 0, 1, 2, or 3
+```
+
+If **touches are rotated or mirrored** relative to what's shown, change `offset_rotation` in the touch config block (values 0–7 cover all combinations of rotation and axis swap — see the comments in `lgfx_config.h` for what each value does).
+
+If colours look **wrong (red and blue swapped)**, set:
+
+```cpp
+cfg.rgb_order = true;
+```
+
+### Step 5 — Run touch calibration
+
+After any hardware change, go to **Settings > Touch Calibrate** on the device to recalibrate the touch screen for your specific unit. The calibration is saved to flash and survives reboots.
 
 ## Status Bar
 
