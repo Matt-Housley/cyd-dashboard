@@ -1,11 +1,91 @@
 {
+    // All tasks invoke PlatformIO's bundled interpreter explicitly, rather
+    // than whatever `pio` resolves to on PATH — they are often different.
+    // That interpreter needs a one-time fix for this project's pinned platform:
+    //     ~/.platformio/penv/bin/python -m pip install "setuptools<81"
+    // Without it every build fails with "No module named 'pkg_resources'".
+    // See README > Building.
     "version": "2.0.0",
     "tasks": [
         {
+            "label": "PlatformIO: Build",
+            "type": "shell",
+            "command": "${userHome}/.platformio/penv/bin/pio",
+            "args": ["run", "--environment", "esp32dev"],
+            "windows": {
+                "command": "${userHome}\\.platformio\\penv\\Scripts\\pio.exe"
+            },
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "focus": false
+            },
+            "problemMatcher": "$gcc"
+        },
+        {
+            "label": "PlatformIO: Upload",
+            "type": "shell",
+            "command": "${userHome}/.platformio/penv/bin/pio",
+            "args": ["run", "--target", "upload", "--environment", "esp32dev"],
+            "windows": {
+                "command": "${userHome}\\.platformio\\penv\\Scripts\\pio.exe"
+            },
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "focus": false
+            },
+            "problemMatcher": "$gcc"
+        },
+        {
+            "label": "PlatformIO: Monitor",
+            "type": "shell",
+            "command": "${userHome}/.platformio/penv/bin/pio",
+            "args": ["device", "monitor"],
+            "windows": {
+                "command": "${userHome}\\.platformio\\penv\\Scripts\\pio.exe"
+            },
+            "group": "test",
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated",
+                "focus": true
+            },
+            "problemMatcher": []
+        },
+        {
+            // Editing sdkconfig.defaults has NO effect until the generated
+            // sdkconfig.esp32dev is deleted — it is only used to seed that file
+            // on the first build. Use this after changing any CONFIG_* value.
+            "label": "PlatformIO: Regenerate sdkconfig and build",
+            "type": "shell",
+            "command": "rm -f sdkconfig.esp32dev && ${userHome}/.platformio/penv/bin/pio run --environment esp32dev",
+            "windows": {
+                "command": "del /f /q sdkconfig.esp32dev & ${userHome}\\.platformio\\penv\\Scripts\\pio.exe run --environment esp32dev"
+            },
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "focus": false
+            },
+            "problemMatcher": "$gcc"
+        },
+        {
+            // WARNING: rewrites the entire SPIFFS partition, which also holds
+            // saved touch calibration. Re-run Settings > Touch Calibrate after.
             "label": "PlatformIO: Upload File System",
             "type": "shell",
             "command": "${userHome}/.platformio/penv/bin/pio",
             "args": ["run", "--target", "uploadfs", "--environment", "esp32dev"],
+            "windows": {
+                "command": "${userHome}\\.platformio\\penv\\Scripts\\pio.exe"
+            },
             "group": "build",
             "presentation": {
                 "reveal": "always",

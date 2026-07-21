@@ -88,6 +88,18 @@ struct ISSData {
     int16_t passRiseAz     = 0;       // rise azimuth, degrees 0-359
     int16_t passSetAz      = 0;       // set azimuth, degrees 0-359
     int8_t  passMaxEl      = 0;       // peak elevation during pass, degrees
+    float   passMidLat     = 0.0f;   // ISS latitude  at pass midpoint (for illumination)
+    float   passMidLon     = 0.0f;   // ISS longitude at pass midpoint
+    float   currentAz      = 0.0f;   // current azimuth   from QTH (degrees, valid when passNow)
+    float   currentEl      = 0.0f;   // current elevation from QTH (degrees, valid when passNow)
+    float   rangeRateKmps  = 0.0f;   // range rate km/s (+ve = approaching, valid when passNow)
+
+    // Orbital parameters saved at fetch time — used to propagate position analytically
+    // each draw frame so az/el/Doppler update smoothly between 30-s API polls.
+    int32_t orbitEpoch     = 0;      // Unix time of last fetch
+    float   orbitU0        = 0.0f;   // mean anomaly argument at epoch
+    float   orbitLambda0   = 0.0f;   // orbital longitude offset at epoch
+    float   orbitLon0      = 0.0f;   // ISS longitude at epoch (degrees)
 };
 
 // ─── DX Spots ─────────────────────────────────────────────────────────────────
@@ -155,6 +167,32 @@ struct SOTASpotsData {
     uint8_t  count = 0;
 };
 
+// ─── FT8 Spots — what local stations are hearing ─────────────────────────────
+// Queries PSK Reporter by receiverGrid (user's 4-char grid square) to find DX
+// stations being decoded by nearby operators.  Deduplicated by sender callsign,
+// keeping the highest-SNR report per sender.
+#define FT8_SPOTS_MAX 50
+
+struct FT8Spot {
+    char   senderCall[14];  // DX station callsign
+    char   senderGrid[8];   // DX station Maidenhead locator
+    float  lat;             // DX station latitude  (from grid)
+    float  lon;             // DX station longitude (from grid)
+    float  freqMHz;         // frequency in MHz
+    int8_t snr;             // best SNR reported by any local receiver
+    char   rxCall[14];      // callsign of local receiver with best SNR
+};
+
+struct FT8SpotsData {
+    bool      valid       = false;
+    bool      fetchFailed = false;
+    uint8_t   total       = 0;   // raw reports parsed before dedup/cap
+    FT8Spot   spots[FT8_SPOTS_MAX];
+    uint8_t   count       = 0;
+};
+
+extern FT8SpotsData g_ft8Spots;
+
 // ─── PSK Reporter reception spots ────────────────────────────────────────────
 // Who received our callsign in the last 15 minutes, sourced from
 // retrieve.pskreporter.info.  Deduplicated by receiver callsign; up to
@@ -220,6 +258,34 @@ extern TzLookupResult   g_tzLookup;
 extern volatile bool    g_tzLookupReq;   // true = lookup requested
 extern volatile float   g_tzLookupLat;
 extern volatile float   g_tzLookupLon;
+
+// ─── Fetch state tracking ─────────────────────────────────────────────────────
+// Written by the fetch task, read by the main loop for status reporting.
+// Individual uint8_t writes on a 32-bit CPU are atomic, so no mutex needed.
+enum FetchState : uint8_t {
+    FS_IDLE   = 0,  // never attempted since boot
+    FS_ACTIVE,      // fetch is currently running
+    FS_OK,          // last fetch completed successfully
+    FS_FAIL,        // last fetch failed (all retries exhausted)
+};
+
+enum FetchSrc : uint8_t {
+    FSRC_WEATHER = 0,
+    FSRC_SOLAR,
+    FSRC_ISS,
+    FSRC_BBC,
+    FSRC_APPLE,
+    FSRC_TRACKER,
+    FSRC_DX,
+    FSRC_POTA,
+    FSRC_SOTA,
+    FSRC_CONTESTS,
+    FSRC_PSK,
+    FSRC_FT8,
+    FSRC_COUNT
+};
+
+extern volatile FetchState g_fetchState[FSRC_COUNT];
 
 // ─── Globals (defined in main.cpp) ───────────────────────────────────────────
 extern WeatherData      g_weather;

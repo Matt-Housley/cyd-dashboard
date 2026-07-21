@@ -206,7 +206,7 @@ static void drawMenu() {
             } else {
                 spr.setTextColor(C(COL_GREY));
                 spr.setCursor(150, ry + 8);
-                spr.print("(Grey Line off)");
+                spr.print("(ISS Tracker off)");
             }
 
         } else if (ri == 7) {
@@ -412,7 +412,7 @@ static void drawScreens() {
 
     static const char* names[NUM_SCREENS] = {
         "Clock", "Weather", "HF Conditions", "Propagation",
-        "Grey Line", "PSK Reporter",
+        "ISS Tracker", "PSK Reporter", "FT8 Spots",
         "DX Spots", "POTA Spots", "SOTA Spots", "Contests",
         "BBC News", "Apple News", "Tracker"
     };
@@ -446,7 +446,7 @@ static void drawScreens() {
         spr.setFont(UI_FONT_9);
         // Screen number (dim) + name — makes it obvious the list is scrollable
         spr.setTextColor(C(COL_GREY));
-        char numBuf[4];
+        char numBuf[16];
         snprintf(numBuf, sizeof(numBuf), "%d.", si + 1);
         spr.setCursor(6, ry + 7);
         spr.print(numBuf);
@@ -865,6 +865,12 @@ bool settingsTouchUp(int32_t sx, int32_t sy,
     bool isSwipe = (abs(ey - sy) > 28 && dtMs < SWIPE_MAX_MS);
 
     switch (g_page) {
+
+    // LovyanGFX's calibrateTouch() blocks and consumes its own input, so there
+    // is nothing to handle here.  Listed explicitly rather than left to fall
+    // through, so -Wswitch keeps checking this switch for gaps.
+    case PAGE_CALIBRATE:
+        break;
 
     // ── MENU ──────────────────────────────────────────────────────────────────
     case PAGE_MENU:

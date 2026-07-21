@@ -10,6 +10,50 @@
 #include <math.h>
 #include <esp_heap_caps.h>
 #include <freertos/semphr.h>
+#include <lwip/sockets.h>   // lwip_setsockopt / SO_LINGER
+
+// ─── Debug timestamp helper ───────────────────────────────────────────────────
+// Prints elapsed time since boot as [MM:SS.mmm] prefix on log lines.
+static void logTs() {
+    uint32_t ms = millis();
+    uint32_t s  = ms / 1000; ms %= 1000;
+    uint32_t m  = s  / 60;   s  %= 60;
+    Serial.printf("[%02u:%02u.%03u] ", m, s, ms);
+}
+#define LOG(...) do { logTs(); Serial.printf(__VA_ARGS__); } while(0)
+
+// Diagnostic: skip contestcalendar.com.  Its TLS handshake aborts on the
+// hardware-AES misalignment (PADLOCK) and leaves ~30 KB of mbedTLS allocations
+// behind, collapsing lb8bit from 34804 to ~4084 permanently — after which every
+// HTTPS fetch fails until reboot.  Set to 0 once mbedTLS is rebuilt with
+// hardware AES disabled for real.
+#define DIAG_NO_CONTESTS 0
+
+// Largest SINGLE contiguous block mbedTLS needs for a handshake.
+//
+// Was 33434 (= in_buf 16717 + out_buf 16717), because the stock Arduino build
+// shipped a prebuilt mbedTLS with symmetric 16384-byte content buffers and no
+// way to change them.  sdkconfig.defaults now sets
+// CONFIG_MBEDTLS_ASYMMETRIC_CONTENT_LEN with OUT=4096, so the two buffers are
+// 16717 and 4373 and are allocated separately — only the larger one has to be
+// contiguous.  Keeping the old 33434 here made this check reject connections
+// that would have succeeded (observed: "lb8bit=27648 < 33434 — skipping TLS").
+//
+// Keep in step with CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN in sdkconfig.defaults.
+#define TLS_MIN_CONTIG 16717U
+
+// Fine-grained heap probe — prints free heap and largest 8-bit block at a
+// labelled point.  Set DIAG_HEAP_PROBES to 1 to localise where heap is lost
+// across a fetch; the probes proved that the drop across sslAllReclaim() is the
+// reserves being re-taken (by design), not a leak on the TLS failure path.
+#define DIAG_HEAP_PROBES 0
+
+#if DIAG_HEAP_PROBES
+#define HEAPPROBE(label) LOG("  [probe] %-22s heap=%u lb8bit=%u\n", (label), \
+    ESP.getFreeHeap(), heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT))
+#else
+#define HEAPPROBE(label) do {} while(0)
+#endif
 
 // ─── Thumbnail buffers ────────────────────────────────────────────────────────
 // Allocated in fetchTask() after the semaphore fires — NOT global arrays — so
@@ -51,7 +95,7 @@ static void sslCtxReclaim()   { if (!g_sslCtxR)    g_sslCtxR   = heap_caps_mallo
 // ~26 KB free block → ~38.9 KB available for mbedTLS in_buf + out_buf.
 static void sslDataRelease() {
     sslX509Release();
-    Serial.printf("[ssl] data-released  lb8bit=%u  heap=%u\n",
+    LOG("[ssl] data-released  lb8bit=%u  heap=%u\n",
                   heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
                   ESP.getFreeHeap());
 }
@@ -59,48 +103,20 @@ static void sslDataRelease() {
 static void sslAllReclaim() {
     sslX509Reclaim();
     sslCtxReclaim();
-    Serial.printf("[ssl] reclaimed  x509=%s ctx=%s  lb8bit=%u\n",
-                  g_sslX509R  ? "OK" : "FAIL",
-                  g_sslCtxR   ? "OK" : "FAIL",
+    bool ctxOk = (g_sslCtxR != nullptr);
+    LOG("[ssl] reclaimed  x509=%s ctx=%s  lb8bit=%u\n",
+                  g_sslX509R ? "OK" : "FAIL",
+                  ctxOk      ? "OK" : "FAIL",
                   heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    if (!ctxOk) {
+        // SSL context slot is permanently lost — all HTTPS will fail. Reboot.
+        LOG("[ssl] ctx slot unrecoverable — rebooting in 3s\n");
+        delay(3000);
+        ESP.restart();
+    }
 }
 
 // ─── Stream-read helpers ──────────────────────────────────────────────────────
-// streamReadText: incremental reader for responses that carry Content-Length.
-// Uses body.reserve(4096) + repeated small realloc so the String grows in-place
-// within whatever contiguous block was available at first allocation — no large
-// upfront reserve required.  Works even when lb8bit ≈ 12 KB (during SSL when
-// in_buf + out_buf have consumed most of the available heap).
-//
-// NOT suitable for chunked Transfer-Encoding (it sees raw "HEX\r\n" headers).
-// For chunked responses, use http.getString() — with getSize() == -1 it skips
-// the Content-Length-based reserve() call and grows the StreamString the same
-// incremental way, while also stripping chunk headers automatically.
-static bool streamReadText(HTTPClient& http, String& body, size_t maxBytes) {
-    int       contentLen = http.getSize();
-    WiFiClient* stream   = http.getStreamPtr();
-    body.reserve(4096);
-    char     cbuf[512];
-    size_t   total = 0;
-    uint32_t t0    = millis();
-    while ((millis() - t0) < 20000) {
-        if (contentLen > 0 && (int)total >= contentLen) break;
-        if (total >= maxBytes) break;
-        int avail = stream->available();
-        if (avail > 0) {
-            size_t toRead = min((size_t)avail, min(sizeof(cbuf), maxBytes - total));
-            int n = stream->readBytes(cbuf, toRead);
-            if (n > 0) { body.concat(cbuf, n); total += n; }
-            vTaskDelay(pdMS_TO_TICKS(1));
-        } else if (!stream->connected()) {
-            break;
-        } else {
-            delay(5);
-        }
-    }
-    http.end();
-    return total > 0;
-}
 
 
 static size_t streamReadBytes(HTTPClient& http, uint8_t* buf, size_t maxLen,
@@ -119,6 +135,16 @@ static size_t streamReadBytes(HTTPClient& http, uint8_t* buf, size_t maxLen,
             delay(5);
         }
     }
+    // Drain as per streamReadText — same orphan-buffer risk for byte streams.
+    {
+        uint32_t drainT0 = millis();
+        size_t   drained = 0;
+        while ((millis() - drainT0) < 2000 && drained < 65536) {
+            if (stream->available() > 0) { stream->read(); drained++; }
+            else if (!stream->connected()) { break; }
+            else { delay(5); }
+        }
+    }
     http.end();
     return got;
 }
@@ -130,88 +156,293 @@ static bool ensureWiFi() {
     WiFi.reconnect();
     for (int i = 0; i < 20 && WiFi.status() != WL_CONNECTED; i++) delay(500);
     bool ok = (WiFi.status() == WL_CONNECTED);
-    Serial.printf("[fetch] WiFi %s\n", ok ? "reconnected" : "reconnect FAILED");
+    LOG("[fetch] WiFi %s\n", ok ? "reconnected" : "reconnect FAILED");
     return ok;
 }
 
-// ─── HTTP GET (text, stream-read with size cap) ───────────────────────────────
-// HTTPS path memory layout per connection:
-//   1. sslCtxRelease()    — frees ctx slot (6136 B)
-//   2. WiFiClientSecure   — sslclient_context (6136 B) → ctx slot ✓
-//   3. sslDataRelease()   — frees x509 slot (12288 B); coalesces with natural
-//                           ~26 KB adjacent block → lb8bit ≈ 38.9 KB ✓
-//   4. http.GET()         — in_buf  (16717 B) ✓  out_buf (16717 B) ✓
-//                           x509 cert (~10 KB) fits in remaining space ✓
-//   5. scopes close       — http destroyed, sc destroyed → ctx slot freed
-//   6. sslAllReclaim()    — x509 and ctx slots reclaimed
-static String httpGet(const char* url, size_t maxBytes = 40960) {
-    const int MAX_TRIES = 3;
-    for (int attempt = 1; attempt <= MAX_TRIES; attempt++) {
-        if (!ensureWiFi()) {
-            if (attempt < MAX_TRIES) delay(2000);
-            continue;
-        }
-        bool isHttps = (strncmp(url, "https://", 8) == 0);
-        Serial.printf("[fetch] heap=%u lb8bit=%u  attempt %d/%d  %s\n",
-                      ESP.getFreeHeap(),
-                      heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
-                      attempt, MAX_TRIES, url);
+// ─── Streaming response consumption ───────────────────────────────────────────
+// httpGet()+streamReadText() force the whole response into one contiguous heap
+// block.  Arduino's String grows by exactly the requested size on every concat
+// (WString.cpp: newSize = (maxStrLen + 16) & ~0xf — no geometric growth), so a
+// 32 KB body costs ~56 reallocs, and the last one needs the old and new buffers
+// live at the same time.  That happens while mbedTLS in_buf + out_buf (33434 B)
+// are also allocated; this board does not have ~65 KB spare.  Worse, concat()'s
+// failure is silent — streamReadText ignored the return value, so an OOM showed
+// up later as a truncated body (the [sota] IncompleteInput).
+//
+// These helpers consume the response as it arrives, so no full-body buffer ever
+// exists and memory use is independent of response size.
 
-        bool   gotBody = false;
-        String body;
+// Drains anything the consumer left, then closes.  Reading to EOF lets the
+// server send FIN before we do, so lwIP does not park the remainder in a
+// permanent receive buffer.
+static void drainAndEnd(HTTPClient& http) {
+    WiFiClient* s = http.getStreamPtr();
+    if (s) {
+        uint32_t t0 = millis();
+        size_t   drained = 0;
+        while ((millis() - t0) < 2000 && drained < 65536) {
+            if (s->available() > 0) { s->read(); drained++; }
+            else if (!s->connected()) break;
+            else delay(5);
+        }
+    }
+    http.end();
+}
+
+// Consumer callback: reads from the live stream, returns true on success.
+typedef bool (*StreamConsumer)(HTTPClient& http, void* ctx);
+
+// Runs the SSL reserve dance and, on HTTP 200, hands the live stream to
+// consume().  Replaces httpGet() for every source that can parse incrementally.
+// userAgent: overrides the default only where a server demands it (Yahoo's
+// finance endpoint rejects non-browser agents).
+static bool httpStream(const char* url, StreamConsumer consume, void* ctx,
+                       const char* who, int maxTries = 3,
+                       const char* userAgent = nullptr) {
+    const char* UA = userAgent ? userAgent : "CYD-Dashboard/1.0 ESP32";
+    for (int attempt = 1; attempt <= maxTries; attempt++) {
+        if (!ensureWiFi()) { if (attempt < maxTries) delay(2000); continue; }
+
+        bool isHttps = (strncmp(url, "https://", 8) == 0);
+        LOG("[%s] heap=%u lb8bit=%u  attempt %d/%d\n", who,
+            ESP.getFreeHeap(),
+            heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+            attempt, maxTries);
+
+        bool ok = false, fatal = false;
 
         if (isHttps) {
-            sslCtxRelease();                    // ctx slot free → sslclient_context goes here
+            sslCtxRelease();
             {
-                WiFiClientSecure sc;            // sslclient_context → ctx slot ✓
-                sslDataRelease();               // x509 slot freed → coalesces → lb8bit ≈ 38.9 KB
+                WiFiClientSecure sc;
+                sslDataRelease();
+                sc.setHandshakeTimeout(30);
+                sc.setTimeout(15000);
                 sc.setInsecure();
                 {
                     HTTPClient http;
                     http.begin(sc, url);
                     http.setTimeout(20000);
                     http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
-                    http.addHeader("User-Agent", "CYD-Dashboard/1.0 ESP32");
+                    http.addHeader("User-Agent", UA);
+                    http.addHeader("Accept", "*/*");
                     http.addHeader("Connection", "close");
                     int code = http.GET();
+                    // Force RST on close so the server stops transmitting at once.
+                    {
+                        int fd = sc.fd();
+                        if (fd >= 0) {
+                            struct linger sl = {1, 0};
+                            lwip_setsockopt(fd, SOL_SOCKET, SO_LINGER, &sl, sizeof(sl));
+                        }
+                    }
                     if (code != HTTP_CODE_OK) {
                         char sslErr[64] = "";
                         sc.lastError(sslErr, sizeof(sslErr));
-                        Serial.printf("[fetch] %s => HTTP %d  ssl='%s'  lb8bit=%u\n",
-                                      url, code, sslErr,
-                                      heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+                        LOG("[%s] HTTP %d  ssl='%s'  lb8bit=%u\n", who, code, sslErr,
+                            heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
                         http.end();
+                        // These get worse with retries, not better.
+                        if (strstr(sslErr, "BIGNUM")     || strstr(sslErr, "Allocation") ||
+                            strstr(sslErr, "allocation") || strstr(sslErr, "PADLOCK")) fatal = true;
                     } else {
-                        gotBody = streamReadText(http, body, maxBytes);
+                        ok = consume(http, ctx);
+                        drainAndEnd(http);
                     }
                 }                               // http destroyed
-            }                                   // sc destroyed → ctx slot freed
-            sslAllReclaim();                    // x509 + ctx slots reclaimed
+            }                                   // sc destroyed
+            sslAllReclaim();
         } else {
-            // Plain HTTP — no SSL bookkeeping needed
             HTTPClient http;
             http.begin(url);
             http.setTimeout(20000);
             http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
-            http.addHeader("User-Agent", "CYD-Dashboard/1.0 ESP32");
+            http.addHeader("User-Agent", UA);
+            http.addHeader("Accept", "*/*");
             http.addHeader("Connection", "close");
             int code = http.GET();
-            if (code != HTTP_CODE_OK) {
-                Serial.printf("[fetch] %s => HTTP %d\n", url, code);
-                http.end();
-            } else {
-                gotBody = streamReadText(http, body, maxBytes);
-            }
+            if (code != HTTP_CODE_OK) { LOG("[%s] HTTP %d\n", who, code); http.end(); }
+            else { ok = consume(http, ctx); drainAndEnd(http); }
         }
 
-        if (!gotBody) {
-            if (attempt < MAX_TRIES) delay(2000);
+        if (ok)    return true;
+        if (fatal) break;
+        if (attempt < maxTries) delay(2000);
+    }
+    return false;
+}
+
+// Sliding-window XML element scanner.  Finds each occurrence of `open` (e.g.
+// "<receptionReport ") in the stream and passes that element's attribute text
+// to onTag().  Memory use is fixed at tagCap bytes regardless of body size, so
+// a 200 KB response costs the same as a 2 KB one.
+typedef void (*TagHandler)(const char* tagBody, void* ctx);
+
+static int scanTags(HTTPClient& http, const char* open, TagHandler onTag,
+                    void* ctx, char* tagBuf, size_t tagCap,
+                    uint32_t timeoutMs = 20000) {
+    WiFiClient* s = http.getStreamPtr();
+    if (!s) return 0;
+
+    const size_t openLen = strlen(open);
+    size_t   m     = 0;          // chars of `open` matched so far
+    bool     inTag = false;
+    bool     inStr = false; char strC = 0;
+    size_t   n     = 0;          // bytes held in tagBuf
+    int      found = 0;
+    char     chunk[256];
+    uint32_t t0    = millis();
+
+    while ((millis() - t0) < timeoutMs) {
+        int avail = s->available();
+        if (avail <= 0) {
+            if (!s->connected()) break;
+            delay(5);
             continue;
         }
-        return body;
+        int got = s->readBytes(chunk, min((size_t)avail, sizeof(chunk)));
+        for (int i = 0; i < got; i++) {
+            char c = chunk[i];
+            if (!inTag) {
+                if (c == open[m]) {
+                    if (++m == openLen) {
+                        // Lead with a space so attr lookups matching " name=\""
+                        // find the very first attribute too.
+                        inTag = true; inStr = false; m = 0;
+                        n = 0; tagBuf[n++] = ' ';
+                    }
+                } else {
+                    m = (c == open[0]) ? 1 : 0;
+                }
+            } else {
+                if (inStr) {
+                    if (c == strC) inStr = false;
+                } else if (c == '"' || c == '\'') {
+                    inStr = true; strC = c;
+                } else if (c == '>') {
+                    tagBuf[n] = '\0';
+                    onTag(tagBuf, ctx);
+                    found++;
+                    inTag = false;
+                    continue;
+                }
+                if (n < tagCap - 1) tagBuf[n++] = c;
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
-    return "";
+    return found;
 }
+
+// Sliding-window element scanner.  Where scanTags() hands back a tag's
+// ATTRIBUTES, this hands back the whole element INCLUDING its inner text —
+// "<spot>...</spot>", "<item>...</item>" — so the existing xmlGet()-style
+// parsers can run against one small bounded block instead of a whole-body
+// String.  Memory use is fixed at blockCap regardless of response size.
+//
+// onBlock receives a NUL-terminated copy of the element, opening tag included.
+// Returns the number of complete blocks seen (blocks longer than blockCap are
+// truncated, still delivered, and still counted).
+typedef void (*BlockHandler)(const char* block, void* ctx);
+
+static int scanBlocks(HTTPClient& http, const char* open, const char* close,
+                      BlockHandler onBlock, void* ctx,
+                      char* buf, size_t blockCap, uint32_t timeoutMs = 20000) {
+    WiFiClient* s = http.getStreamPtr();
+    if (!s) return 0;
+
+    const size_t openLen  = strlen(open);
+    const size_t closeLen = strlen(close);
+    size_t   mOpen = 0, mClose = 0;
+    bool     inBlock = false;
+    size_t   n = 0;
+    int      found = 0;
+    char     chunk[256];
+    uint32_t t0 = millis();
+
+    while ((millis() - t0) < timeoutMs) {
+        int avail = s->available();
+        if (avail <= 0) {
+            if (!s->connected()) break;
+            delay(5);
+            continue;
+        }
+        int got = s->readBytes(chunk, min((size_t)avail, sizeof(chunk)));
+        for (int i = 0; i < got; i++) {
+            char c = chunk[i];
+
+            if (!inBlock) {
+                if (c == open[mOpen]) {
+                    if (++mOpen == openLen) {
+                        inBlock = true; mClose = 0;
+                        n = 0;
+                        // Replay the opening tag so xmlGet() sees a whole element
+                        for (size_t k = 0; k < openLen && n < blockCap - 1; k++)
+                            buf[n++] = open[k];
+                        mOpen = 0;
+                    }
+                } else {
+                    mOpen = (c == open[0]) ? 1 : 0;
+                }
+                continue;
+            }
+
+            if (n < blockCap - 1) buf[n++] = c;
+
+            if (c == close[mClose]) {
+                if (++mClose == closeLen) {
+                    buf[n] = '\0';
+                    onBlock(buf, ctx);
+                    found++;
+                    inBlock = false; mOpen = 0; mClose = 0;
+                }
+            } else {
+                mClose = (c == close[0]) ? 1 : 0;
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+    return found;
+}
+
+// Bounded whole-body read, for responses small enough that a fixed buffer is
+// clearer than a streaming parser (ISS ~200 B, solar ~3 KB, contest detail).
+// Unlike the old streamReadText() this writes into caller-owned storage, so
+// there is no incremental String growth and no silent truncation on OOM.
+struct TextSink { char* buf; size_t cap; size_t len; };
+
+static bool textConsume(HTTPClient& http, void* ctx) {
+    TextSink& t = *(TextSink*)ctx;
+    WiFiClient* s = http.getStreamPtr();
+    if (!s) return false;
+    uint32_t t0 = millis();
+    while (t.len < t.cap - 1 && (millis() - t0) < 20000) {
+        int avail = s->available();
+        if (avail > 0) {
+            int n = s->readBytes(t.buf + t.len,
+                                 min((size_t)avail, t.cap - 1 - t.len));
+            if (n > 0) t.len += n;
+            vTaskDelay(pdMS_TO_TICKS(1));
+        } else if (!s->connected()) {
+            break;
+        } else {
+            delay(5);
+        }
+    }
+    t.buf[t.len] = '\0';
+    return t.len > 0;
+}
+
+// Fetch a whole (small) body into buf.  Returns bytes read, 0 on failure.
+static size_t httpFetchText(const char* url, char* buf, size_t cap,
+                            const char* who, int maxTries = 3) {
+    TextSink t = { buf, cap, 0 };
+    buf[0] = '\0';
+    if (!httpStream(url, textConsume, &t, who, maxTries)) return 0;
+    return t.len;
+}
+
 
 // ─── HTTP GET (binary) ────────────────────────────────────────────────────────
 static size_t httpGetBytes(const char* url, uint8_t* buf, size_t maxLen,
@@ -222,7 +453,7 @@ static size_t httpGetBytes(const char* url, uint8_t* buf, size_t maxLen,
             continue;
         }
         bool isHttps = (strncmp(url, "https://", 8) == 0);
-        Serial.printf("[fetch-bytes] heap=%u lb8bit=%u  attempt %d/%d  %s\n",
+        LOG("[fetch-bytes] heap=%u lb8bit=%u  attempt %d/%d  %s\n",
                       ESP.getFreeHeap(),
                       heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
                       attempt, maxTries, url);
@@ -242,7 +473,7 @@ static size_t httpGetBytes(const char* url, uint8_t* buf, size_t maxLen,
                     http.addHeader("User-Agent", "CYD-Dashboard/1.0 ESP32");
                     int code = http.GET();
                     if (code != HTTP_CODE_OK) {
-                        Serial.printf("[fetch-bytes] %s => HTTP %d\n", url, code);
+                        LOG("[fetch-bytes] %s => HTTP %d\n", url, code);
                         http.end();
                     } else {
                         got = streamReadBytes(http, buf, maxLen, timeoutMs);
@@ -257,7 +488,7 @@ static size_t httpGetBytes(const char* url, uint8_t* buf, size_t maxLen,
             http.addHeader("User-Agent", "CYD-Dashboard/1.0 ESP32");
             int code = http.GET();
             if (code != HTTP_CODE_OK) {
-                Serial.printf("[fetch-bytes] %s => HTTP %d\n", url, code);
+                LOG("[fetch-bytes] %s => HTTP %d\n", url, code);
                 http.end();
             } else {
                 got = streamReadBytes(http, buf, maxLen, timeoutMs);
@@ -268,7 +499,7 @@ static size_t httpGetBytes(const char* url, uint8_t* buf, size_t maxLen,
             if (attempt < maxTries) delay(2000);
             continue;
         }
-        Serial.printf("[fetch-bytes] got %u bytes\n", (unsigned)got);
+        LOG("[fetch-bytes] got %u bytes\n", (unsigned)got);
         return got;
     }
     return 0;
@@ -372,6 +603,7 @@ static const char* dayAbbr(int wday) {
 // getStreamPtr() returns raw bytes including chunk-size headers ("3a4\r\n…").
 // http.getString() de-chunks automatically — use that instead.
 void fetchWeather() {
+    g_fetchState[FSRC_WEATHER] = FS_ACTIVE;
     char url[420];
     // Always fetch in °C and mph — unit conversion to °F / km/h is done at display time
     // so toggling units takes effect instantly without waiting for a re-fetch.
@@ -385,49 +617,26 @@ void fetchWeather() {
         "&wind_speed_unit=mph&timezone=auto&forecast_days=7",
         g_settings.lat, g_settings.lon);
 
-    const int MAX_TRIES = 3;
+    // open-meteo sends chunked Transfer-Encoding.  getStreamPtr() exposes raw
+    // "HEX\r\n" chunk headers, so this source cannot use the streaming scanners
+    // the others do — getString() is what de-chunks.  The body is only ~3-5 KB,
+    // so the single allocation is not a heap risk; what matters here is that the
+    // hand-rolled SSL release/reclaim block is gone in favour of httpStream().
     String body;
-    for (int attempt = 1; attempt <= MAX_TRIES; attempt++) {
-        if (!ensureWiFi()) { if (attempt < MAX_TRIES) delay(2000); continue; }
-        Serial.printf("[weather] attempt %d/%d\n", attempt, MAX_TRIES);
-
-        sslCtxRelease();
-        {
-            WiFiClientSecure sc;            // sslclient_context → ctx slot ✓
-            sslDataRelease();               // x509 slot freed → coalesces → lb8bit ≈ 38.9 KB
-            sc.setInsecure();
-            {
-                HTTPClient http;
-                http.begin(sc, url);
-                http.setTimeout(20000);
-                http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
-                http.addHeader("User-Agent", "CYD-Dashboard/1.0 ESP32");
-                http.addHeader("Connection", "close");
-                int code = http.GET();
-                Serial.printf("[weather] HTTP %d\n", code);
-                if (code != HTTP_CODE_OK) {
-                    http.end();
-                } else {
-                    // open-meteo uses chunked Transfer-Encoding; getString()
-                    // de-chunks automatically (getStreamPtr() would expose raw
-                    // chunk headers).  Response is ~3-5 KB — no heap risk.
-                    body = http.getString();
-                    http.end();
-                }
-            }                               // http destroyed
-        }                                   // sc destroyed
-        sslAllReclaim();
-
-        if (!body.isEmpty()) break;
-        if (attempt < MAX_TRIES) delay(2000);
-    }
-    Serial.printf("[weather] body=%u\n", body.length());
-    if (body.isEmpty()) return;
+    httpStream(url,
+        [](HTTPClient& http, void* ctx) -> bool {
+            String& b = *(String*)ctx;
+            b = http.getString();
+            return b.length() > 0;
+        },
+        &body, "weather");
+    LOG("[weather] body=%u\n", body.length());
+    if (body.isEmpty()) { g_fetchState[FSRC_WEATHER] = FS_FAIL; return; }
 
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, body);
 
-    if (err) { Serial.printf("[weather] JSON: %s\n", err.c_str()); return; }
+    if (err) { LOG("[weather] JSON: %s\n", err.c_str()); g_fetchState[FSRC_WEATHER] = FS_FAIL; return; }
 
     WeatherData wd;
     wd.valid    = true;
@@ -445,7 +654,7 @@ void fetchWeather() {
     auto windDs = doc["daily"]["wind_direction_10m_dominant"].as<JsonArray>();
 
     wd.dayCount = (uint8_t)min((int)times.size(), 7);
-    Serial.printf("[weather] dayCount=%d  times.size=%d\n", wd.dayCount, (int)times.size());
+    LOG("[weather] dayCount=%d  times.size=%d\n", wd.dayCount, (int)times.size());
 
     for (int i = 0; i < wd.dayCount; i++) {
         String ds = times[i].as<String>();
@@ -497,7 +706,8 @@ void fetchWeather() {
     xSemaphoreTake(g_dataMutex, portMAX_DELAY);
     g_weather = wd;
     xSemaphoreGive(g_dataMutex);
-    Serial.printf("[weather] OK  %dC  rain:%s  ltng:%dh(%d%%)  days:%d\n",
+    g_fetchState[FSRC_WEATHER] = FS_OK;
+    LOG("[weather] OK  %dC  rain:%s  ltng:%dh(%d%%)  days:%d\n",
                   wd.temp, wd.rainIn,
                   (int)wd.lightningHours, (int)wd.lightningPct,
                   wd.dayCount);
@@ -505,8 +715,19 @@ void fetchWeather() {
 
 // ─── SOLAR ────────────────────────────────────────────────────────────────────
 void fetchSolar() {
-    String body = httpGet(API_SOLAR);
-    if (body.isEmpty()) return;
+    g_fetchState[FSRC_SOLAR] = FS_ACTIVE;
+    // hamqsl solarxml.php is ~3 KB.  One bounded allocation, parsed in place,
+    // released before the data is published — no incremental String growth.
+    const size_t SOLAR_CAP = 6144;
+    char* sbuf = (char*)malloc(SOLAR_CAP);
+    if (!sbuf) { g_fetchState[FSRC_SOLAR] = FS_FAIL; return; }
+    if (!httpFetchText(API_SOLAR, sbuf, SOLAR_CAP, "solar")) {
+        free(sbuf);
+        g_fetchState[FSRC_SOLAR] = FS_FAIL;
+        return;
+    }
+    String body(sbuf);
+    free(sbuf);
 
     SolarData sd;
     sd.valid    = true;
@@ -535,14 +756,14 @@ void fetchSolar() {
     {
         int ccPos = body.indexOf("<calculatedconditions>");
         if (ccPos < 0) {
-            Serial.printf("[solar] WARNING: no <calculatedconditions> in body (len=%u)\n",
+            LOG("[solar] WARNING: no <calculatedconditions> in body (len=%u)\n",
                           body.length());
         } else {
             int bpos = body.indexOf("<band", ccPos);
             if (bpos >= 0) {
                 int bend = body.indexOf("</band>", bpos);
                 String sample = body.substring(bpos, bend + 7);
-                Serial.printf("[solar] band sample: %s\n", sample.c_str());
+                LOG("[solar] band sample: %s\n", sample.c_str());
             }
         }
     }
@@ -550,7 +771,8 @@ void fetchSolar() {
     xSemaphoreTake(g_dataMutex, portMAX_DELAY);
     g_solar = sd;
     xSemaphoreGive(g_dataMutex);
-    Serial.printf("[solar] OK  SFI:%d K:%d A:%d  80m-day:%s\n",
+    g_fetchState[FSRC_SOLAR] = FS_OK;
+    LOG("[solar] OK  SFI:%d K:%d A:%d  80m-day:%s\n",
                   sd.sfi, sd.kIndex, sd.aIndex, sd.bands[0].day);
 }
 
@@ -815,90 +1037,70 @@ static int streamReadItem(WiFiClient* s, char* buf, int bufLen, uint32_t deadlin
 // is enough for one small String(itemBuf) + parseRSS substrings per item.
 //
 // Returns true if nd.count > 0.
+struct RSSCtx { NewsData* nd; int maxItems; };
+
+// The RSS reader already consumed one <item> at a time off the socket; this
+// keeps that loop verbatim and only replaces the hand-rolled SSL choreography
+// around it with httpStream().
+static bool rssConsume(HTTPClient& http, void* ctx) {
+    RSSCtx&   c  = *(RSSCtx*)ctx;
+    NewsData& nd = *c.nd;
+
+    WiFiClient* stream   = http.getStreamPtr();
+    uint32_t    deadline = millis() + 20000;
+
+    // Static so it lives in .bss, not on the task stack.  fetchRSSNews is
+    // always called sequentially (never re-entrant), so one shared buffer
+    // across invocations is safe.
+    static char itemBuf[1024];
+
+    while (nd.count < c.maxItems && millis() < deadline) {
+        if (!streamSkipToItem(stream, deadline)) break;
+        int len = streamReadItem(stream, itemBuf, sizeof(itemBuf), deadline);
+        if (len < 0) break;
+        // Wrap the buffered item in a temporary String for parseRSS — ~1 KB,
+        // freed each iteration.
+        String itemStr(itemBuf);
+        NewsData one;
+        parseRSS(itemStr, one, 1);
+        if (one.count > 0)
+            nd.items[nd.count++] = one.items[0];
+    }
+    nd.valid = true;
+    return nd.count > 0;   // zero items => httpStream retries
+}
+
 static bool fetchRSSNews(const char* url, const char* tag,
                          NewsData& nd, int maxItems) {
-    for (int attempt = 1; attempt <= 3; attempt++) {
-        if (!ensureWiFi()) { if (attempt < 3) delay(2000); continue; }
-        Serial.printf("[fetch] heap=%u lb8bit=%u  attempt %d/3  %s\n",
-                      ESP.getFreeHeap(),
-                      heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
-                      attempt, url);
+    nd.count = 0;
+    nd.valid = false;
 
-        nd.count = 0;
-        nd.valid = false;
-        bool connected = false;
+    RSSCtx c = { &nd, maxItems };
+    httpStream(url, rssConsume, &c, tag);
 
-        sslCtxRelease();
-        {
-            WiFiClientSecure sc;
-            sslDataRelease();   // x509 freed → coalesces → lb8bit ≈ 38.9 KB
-            sc.setInsecure();
-            {
-                HTTPClient http;
-                http.begin(sc, url);
-                http.setTimeout(20000);
-                http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
-                http.addHeader("User-Agent", "CYD-Dashboard/1.0 ESP32");
-                http.addHeader("Connection", "close");
-                int code = http.GET();
-                if (code != HTTP_CODE_OK) {
-                    char sslErr[64] = "";
-                    sc.lastError(sslErr, sizeof(sslErr));
-                    Serial.printf("[fetch] %s => HTTP %d  ssl='%s'  lb8bit=%u\n",
-                                  url, code, sslErr,
-                                  heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-                    http.end();
-                } else {
-                    connected = true;
-                    WiFiClient* stream = http.getStreamPtr();
-                    uint32_t deadline = millis() + 20000;
-                    // Static so it lives in .bss, not on the task stack.
-                    // fetchRSSNews is always called sequentially (never re-entrant),
-                    // so sharing one buffer across invocations is safe.
-                    static char itemBuf[1024];
-
-                    while (nd.count < maxItems && millis() < deadline) {
-                        if (!streamSkipToItem(stream, deadline)) break;
-                        int len = streamReadItem(stream, itemBuf, sizeof(itemBuf), deadline);
-                        if (len < 0) break;
-                        // Wrap the buffered item content in a temporary String for
-                        // parseRSS.  ~1 KB alloc while in_buf+out_buf hold ~33 KB;
-                        // the remaining ~5 KB is enough for this and its substrings.
-                        String itemStr(itemBuf);
-                        NewsData one;
-                        parseRSS(itemStr, one, 1);
-                        if (one.count > 0)
-                            nd.items[nd.count++] = one.items[0];
-                    }   // itemStr freed each iteration
-                    nd.valid = true;
-                    http.end();
-                }
-            }   // http destroyed
-        }   // sc destroyed → in_buf + out_buf freed
-        sslAllReclaim();
-
-        Serial.printf("[%s] %d items  connected=%d\n", tag, nd.count, (int)connected);
-        if (nd.count > 0) break;
-        if (attempt < 3) delay(2000);
-    }
+    Serial.printf("[%s] %d items\n", tag, nd.count);
     return nd.count > 0;
 }
 
 void fetchBBCNews() {
+    g_fetchState[FSRC_BBC] = FS_ACTIVE;
     NewsData nd;
-    if (!fetchRSSNews(API_BBC_RSS, "bbc", nd, 4)) return;
+    if (!fetchRSSNews(API_BBC_RSS, "bbc", nd, 4)) { g_fetchState[FSRC_BBC] = FS_FAIL; return; }
     xSemaphoreTake(g_dataMutex, portMAX_DELAY);
     g_bbcNews = nd;
     xSemaphoreGive(g_dataMutex);
+    g_fetchState[FSRC_BBC] = FS_OK;
     fetchThumb(nd.items[0].thumbUrl, g_bbcThumbBuf, g_bbcThumbLen, g_bbcThumbVersion);
 }
 
 void fetchAppleNews() {
+    g_fetchState[FSRC_APPLE] = FS_ACTIVE;
     NewsData nd;
-    if (!fetchRSSNews(API_APPLE_RSS, "apple", nd, 4)) return;
+    if (!fetchRSSNews(API_APPLE_RSS, "apple", nd, 4)) { g_fetchState[FSRC_APPLE] = FS_FAIL; return; }
     xSemaphoreTake(g_dataMutex, portMAX_DELAY);
     g_appleNews = nd;
     xSemaphoreGive(g_dataMutex);
+    g_fetchState[FSRC_APPLE] = FS_OK;
 
     // MacRumors images are full-resolution (2000+ px) — far too large for the
     // 6 KB thumb buffer.  Route through wsrv.nl, a free image-resize CDN proxy,
@@ -912,7 +1114,7 @@ void fetchAppleNews() {
         snprintf(proxyUrl, sizeof(proxyUrl),
                  "https://wsrv.nl/?url=%s&w=118&h=66&output=jpg&fit=cover&q=75",
                  src);
-        Serial.printf("[apple] thumb via wsrv.nl: %s\n", proxyUrl);
+        LOG("[apple] thumb via wsrv.nl: %s\n", proxyUrl);
         fetchThumb(proxyUrl, g_appleThumbBuf, g_appleThumbLen, g_appleThumbVersion);
     }
 }
@@ -922,100 +1124,92 @@ void fetchAppleNews() {
 // Streams the response and locates the "close":[ array without loading the
 // entire ~50 KB JSON into RAM.  No ArduinoJson involved (the filter approach
 // silently discarded the data on this endpoint).
+// Yahoo streams a large JSON chart payload; we only need the "close" array, so
+// this scans for it byte-by-byte and never buffers the body.  Unchanged from the
+// previous implementation apart from losing its hand-rolled SSL block.
+struct TrackerCtx { float* closes; int closeCount; size_t total; };
+
+static bool trackerConsume(HTTPClient& http, void* ctx) {
+    TrackerCtx& st = *(TrackerCtx*)ctx;
+    WiFiClient* stream = http.getStreamPtr();
+
+    static const char NEEDLE[]  = "\"close\":[";
+    const int         NEEDLE_LEN = 9;
+    int      matchPos = 0;
+    bool     inArray  = false;
+    bool     done     = false;
+    char     numBuf[20];
+    int      numLen   = 0;
+    uint32_t t0       = millis();
+    uint8_t  cbuf[256];
+
+    while (!done && (millis() - t0) < 25000 && st.total < 300000UL) {
+        int av = stream->available();
+        if (av <= 0) {
+            if (!stream->connected()) break;
+            delay(5);
+            continue;
+        }
+        size_t n = stream->readBytes(cbuf, (size_t)min(av, (int)sizeof(cbuf)));
+        st.total += n;
+        for (size_t i = 0; i < n && !done; i++) {
+            char ch = (char)cbuf[i];
+            if (!inArray) {
+                if (ch == NEEDLE[matchPos]) {
+                    if (++matchPos == NEEDLE_LEN) { inArray = true; matchPos = 0; }
+                } else {
+                    matchPos = (ch == NEEDLE[0]) ? 1 : 0;
+                }
+            } else {
+                if ((ch >= '0' && ch <= '9') || ch == '.') {
+                    if (numLen < 18) numBuf[numLen++] = ch;
+                } else if (ch == '-' && numLen == 0) {
+                    numBuf[numLen++] = ch;
+                } else {
+                    if (numLen > 0) {
+                        numBuf[numLen] = '\0';
+                        float v = atof(numBuf);
+                        if (v > 100.0f && st.closeCount < TRACKER_POINTS)
+                            st.closes[st.closeCount++] = v;
+                        numLen = 0;
+                    }
+                    if (ch == ']') done = true;
+                }
+            }
+        }
+    }
+    if (numLen > 0 && st.closeCount < TRACKER_POINTS) {
+        numBuf[numLen] = '\0';
+        float v = atof(numBuf);
+        if (v > 100.0f) st.closes[st.closeCount++] = v;
+    }
+    return st.closeCount > 0;
+}
+
 void fetchTracker() {
     char trackerUrl[128];
     snprintf(trackerUrl, sizeof(trackerUrl),
              "https://query1.finance.yahoo.com/v8/finance/chart/%s?interval=1wk&range=%dy",
              g_settings.trackerSymbol, (int)g_settings.trackerRangeYears);
 
-    float    closes[TRACKER_POINTS];
-    int      closeCount = 0;
-    size_t   total      = 0;
+    g_fetchState[FSRC_TRACKER] = FS_ACTIVE;
+    float closes[TRACKER_POINTS];
 
-    sslCtxRelease();
-    {
-        WiFiClientSecure sc;            // sslclient_context → ctx slot ✓
-        sslDataRelease();               // in/out/x509 slots freed
-        sc.setInsecure();
-        {
-            HTTPClient http;
-            http.begin(sc, trackerUrl);
-            http.setTimeout(25000);
-            http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
-            http.addHeader("User-Agent",
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36");
-            http.addHeader("Accept", "*/*");
-            http.addHeader("Connection", "close");
-            int code = http.GET();
-            Serial.printf("[tracker] HTTP %d\n", code);
-            if (code != HTTP_CODE_OK) {
-                http.end();
-            } else {
-                WiFiClient* stream = http.getStreamPtr();
+    TrackerCtx st = { closes, 0, 0 };
+    // Yahoo rejects non-browser user agents.
+    httpStream(trackerUrl, trackerConsume, &st, "tracker", 3,
+               "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+               "AppleWebKit/537.36 (KHTML, like Gecko) "
+               "Chrome/124.0.0.0 Safari/537.36");
 
-                // State machine: scan for  "close":[  then parse ASCII floats.
-                static const char NEEDLE[]  = "\"close\":[";
-                const int         NEEDLE_LEN = 9;
-                int      matchPos = 0;
-                bool     inArray  = false;
-                bool     done     = false;
-                char     numBuf[20];
-                int      numLen   = 0;
-                uint32_t t0       = millis();
-                uint8_t  cbuf[256];
+    const int    closeCount = st.closeCount;
+    const size_t total      = st.total;
 
-                while (!done && (millis() - t0) < 25000 && total < 300000UL) {
-                    int av = stream->available();
-                    if (av <= 0) {
-                        if (!stream->connected()) break;
-                        delay(5);
-                        continue;
-                    }
-                    size_t n = stream->readBytes(cbuf,
-                                   (size_t)min(av, (int)sizeof(cbuf)));
-                    total += n;
-                    for (size_t i = 0; i < n && !done; i++) {
-                        char ch = (char)cbuf[i];
-                        if (!inArray) {
-                            if (ch == NEEDLE[matchPos]) {
-                                if (++matchPos == NEEDLE_LEN) { inArray = true; matchPos = 0; }
-                            } else {
-                                matchPos = (ch == NEEDLE[0]) ? 1 : 0;
-                            }
-                        } else {
-                            if ((ch >= '0' && ch <= '9') || ch == '.') {
-                                if (numLen < 18) numBuf[numLen++] = ch;
-                            } else if (ch == '-' && numLen == 0) {
-                                numBuf[numLen++] = ch;
-                            } else {
-                                if (numLen > 0) {
-                                    numBuf[numLen] = '\0';
-                                    float v = atof(numBuf);
-                                    if (v > 100.0f && closeCount < TRACKER_POINTS)
-                                        closes[closeCount++] = v;
-                                    numLen = 0;
-                                }
-                                if (ch == ']') done = true;
-                            }
-                        }
-                    }
-                }
-                if (numLen > 0 && closeCount < TRACKER_POINTS) {
-                    numBuf[numLen] = '\0';
-                    float v = atof(numBuf);
-                    if (v > 100.0f) closes[closeCount++] = v;
-                }
-                http.end();
-            }
-        }                               // http destroyed
-    }                                   // sc destroyed
-    sslAllReclaim();
-    Serial.printf("[tracker] read=%u  closes=%d\n", (unsigned)total, closeCount);
+    LOG("[tracker] read=%u  closes=%d\n", (unsigned)total, closeCount);
 
     if (closeCount < 2) {
         Serial.println("[tracker] insufficient data — check URL/network");
+        g_fetchState[FSRC_TRACKER] = FS_FAIL;
         return;
     }
 
@@ -1032,7 +1226,8 @@ void fetchTracker() {
     xSemaphoreTake(g_dataMutex, portMAX_DELAY);
     g_tracker = sd;
     xSemaphoreGive(g_dataMutex);
-    Serial.printf("[tracker] OK  $%.2f  %+.2f%%  pts=%d\n",
+    g_fetchState[FSRC_TRACKER] = FS_OK;
+    LOG("[tracker] OK  $%.2f  %+.2f%%  pts=%d\n",
                   sd.price, sd.changePct, sd.histCount);
 }
 
@@ -1155,119 +1350,122 @@ static float gcBearing(float la1, float lo1, float la2, float lo2) {
     return b;
 }
 
-void fetchDXSpots() {
-    String body = httpGet(API_DXSPOTS, 24576);
-    if (body.isEmpty()) return;
+// Candidate pool — file scope so the streaming block handler can reach it, and
+// static so 50 x DXSpot stays off the fetch task stack.
+struct DXCand { DXSpot spot; float dist; };
+static DXCand cands[50];
 
-    if (body.indexOf("<spot") < 0) {
-        Serial.println("[dx] XML: no <spot> elements found");
+// One <spot>...</spot> element, handed over as it arrives off the wire.
+// Body is unchanged from the old whole-body loop; only the source of `block`
+// differs, so the parsing behaviour is identical.
+static void dxOnBlock(const char* blockStr, void* ctx) {
+    int& nc = *(int*)ctx;
+    if (nc >= 50) return;
+
+    String block(blockStr);
+
+    String dxStr  = xmlGet(block, "dx");
+    String sptStr = xmlGet(block, "spotter");
+    String frStr  = xmlGet(block, "frequency");
+    String cmtStr = xmlGet(block, "comment");
+    String tmStr  = xmlGet(block, "time");   // "2026-05-26 10:28:00"
+
+    if (dxStr.isEmpty() || frStr.isEmpty()) return;
+    float fr = frStr.toFloat();
+    if (fr < 1.0f) return;
+
+    // Trim whitespace from callsigns.
+    dxStr.trim();
+    sptStr.trim();
+
+    // Decode HTML entities in comment (&lt; &gt; &amp; &apos; etc.)
+    cmtStr = decodeHtmlEntities(cmtStr);
+    cmtStr.trim();
+
+    // Convert "YYYY-MM-DD HH:MM:SS" -> "HH:MMZ"
+    char tmBuf[8] = "";
+    {
+        int sp = tmStr.indexOf(' ');
+        if (sp >= 0 && sp + 6 <= (int)tmStr.length()) {
+            String hhmm = tmStr.substring(sp + 1, sp + 6);  // "HH:MM"
+            snprintf(tmBuf, sizeof(tmBuf), "%sZ", hhmm.c_str());
+        } else {
+            strlcpy(tmBuf, tmStr.c_str(), sizeof(tmBuf));
+        }
+    }
+
+    const char* dx  = dxStr.c_str();
+    const char* spt = sptStr.c_str();
+    const char* cmt = cmtStr.c_str();
+
+    // Spotter location from prefix table.
+    float sLat = 0.0f, sLon = 0.0f;
+    bool  gotLoc = pfxToLatLon(spt, sLat, sLon);
+    float dist = gotLoc ? gcKm(g_settings.lat, g_settings.lon, sLat, sLon)
+                        : 1e9f;   // unknowns sort to end
+
+    // DX station location, distance, and bearing from QTH.
+    float dxLat = 0.0f, dxLon = 0.0f;
+    bool  gotDxLoc = pfxToLatLon(dx, dxLat, dxLon);
+    uint16_t dxDistKm = 0;
+    uint16_t dxBear   = 0xFFFF;
+    if (gotDxLoc) {
+        float d = gcKm(g_settings.lat, g_settings.lon, dxLat, dxLon);
+        float b = gcBearing(g_settings.lat, g_settings.lon, dxLat, dxLon);
+        dxDistKm = (d < 65535.0f) ? (uint16_t)d : 0;
+        dxBear   = (uint16_t)(b + 0.5f) % 360;
+    }
+
+    // Deduplicate by spotted callsign — keep the closer spotter.
+    for (int i = 0; i < nc; i++) {
+        if (strcasecmp(cands[i].spot.dx, dx) == 0) {
+            if (dist < cands[i].dist) {
+                cands[i].dist = dist;
+                strlcpy(cands[i].spot.spotter, spt,   sizeof(cands[i].spot.spotter));
+                strlcpy(cands[i].spot.time,    tmBuf, sizeof(cands[i].spot.time));
+                strlcpy(cands[i].spot.comment, cmt,   sizeof(cands[i].spot.comment));
+                cands[i].spot.dist_km = (gotLoc && dist < 65535.0f)
+                                      ? (uint16_t)dist : 0;
+            }
+            return;
+        }
+    }
+
+    DXSpot& s = cands[nc].spot;
+    strlcpy(s.dx,      dx,    sizeof(s.dx));
+    strlcpy(s.spotter, spt,   sizeof(s.spotter));
+    s.freq = fr;
+    strlcpy(s.comment, cmt,   sizeof(s.comment));
+    strlcpy(s.time,    tmBuf, sizeof(s.time));
+    s.dist_km    = (gotLoc && dist < 65535.0f) ? (uint16_t)dist : 0;
+    s.dx_dist_km = dxDistKm;
+    s.dx_bearing = dxBear;
+    cands[nc].dist = dist;
+    nc++;
+}
+
+static bool dxConsume(HTTPClient& http, void* ctx) {
+    char blockBuf[512];          // one <spot> element; DX comments are short
+    int n = scanBlocks(http, "<spot", "</spot>", dxOnBlock, ctx,
+                       blockBuf, sizeof(blockBuf));
+    if (n == 0) Serial.println("[dx] XML: no <spot> elements found");
+    return n > 0;
+}
+
+void fetchDXSpots() {
+    g_fetchState[FSRC_DX] = FS_ACTIVE;
+    int nc = 0;
+    if (!httpStream(API_DXSPOTS, dxConsume, &nc, "dx")) {
+        g_fetchState[FSRC_DX] = FS_FAIL;
         return;
     }
 
-    // Candidate pool — static to stay off the 8 KB task stack.
-    struct Cand { DXSpot spot; float dist; };
-    static Cand cands[50];
-    int nc = 0;
 
-    // Walk through every <spot ...>...</spot> block.
-    int searchFrom = 0;
-    while (nc < 50) {
-        int tagStart = body.indexOf("<spot", searchFrom);
-        if (tagStart < 0) break;
-        int blockEnd = body.indexOf("</spot>", tagStart);
-        if (blockEnd < 0) break;
-        blockEnd += 7;  // include closing tag
-        String block = body.substring(tagStart, blockEnd);
-        searchFrom = blockEnd;
-
-        String dxStr  = xmlGet(block, "dx");
-        String sptStr = xmlGet(block, "spotter");
-        String frStr  = xmlGet(block, "frequency");
-        String cmtStr = xmlGet(block, "comment");
-        String tmStr  = xmlGet(block, "time");   // "2026-05-26 10:28:00"
-
-        if (dxStr.isEmpty() || frStr.isEmpty()) continue;
-        float fr = frStr.toFloat();
-        if (fr < 1.0f) continue;
-
-        // Trim whitespace from callsigns.
-        dxStr.trim();
-        sptStr.trim();
-
-        // Decode HTML entities in comment (&lt; &gt; &amp; &apos; etc.)
-        cmtStr = decodeHtmlEntities(cmtStr);
-        cmtStr.trim();
-
-        // Convert "YYYY-MM-DD HH:MM:SS" → "HH:MMZ"
-        char tmBuf[8] = "";
-        {
-            int sp = tmStr.indexOf(' ');
-            if (sp >= 0 && sp + 6 <= (int)tmStr.length()) {
-                String hhmm = tmStr.substring(sp + 1, sp + 6);  // "HH:MM"
-                snprintf(tmBuf, sizeof(tmBuf), "%sZ", hhmm.c_str());
-            } else {
-                strlcpy(tmBuf, tmStr.c_str(), sizeof(tmBuf));
-            }
-        }
-
-        const char* dx  = dxStr.c_str();
-        const char* spt = sptStr.c_str();
-        const char* cmt = cmtStr.c_str();
-
-        // Spotter location from prefix table.
-        float sLat = 0.0f, sLon = 0.0f;
-        bool  gotLoc = pfxToLatLon(spt, sLat, sLon);
-        float dist = gotLoc ? gcKm(g_settings.lat, g_settings.lon, sLat, sLon)
-                            : 1e9f;   // unknowns sort to end
-
-        // DX station location, distance, and bearing from QTH.
-        float dxLat = 0.0f, dxLon = 0.0f;
-        bool  gotDxLoc = pfxToLatLon(dx, dxLat, dxLon);
-        uint16_t dxDistKm = 0;
-        uint16_t dxBear   = 0xFFFF;
-        if (gotDxLoc) {
-            float d = gcKm(g_settings.lat, g_settings.lon, dxLat, dxLon);
-            float b = gcBearing(g_settings.lat, g_settings.lon, dxLat, dxLon);
-            dxDistKm = (d < 65535.0f) ? (uint16_t)d : 0;
-            dxBear   = (uint16_t)(b + 0.5f) % 360;
-        }
-
-        // Deduplicate by spotted callsign — keep the closer spotter.
-        bool dup = false;
-        for (int i = 0; i < nc; i++) {
-            if (strcasecmp(cands[i].spot.dx, dx) == 0) {
-                if (dist < cands[i].dist) {
-                    cands[i].dist = dist;
-                    strlcpy(cands[i].spot.spotter, spt,   sizeof(cands[i].spot.spotter));
-                    strlcpy(cands[i].spot.time,    tmBuf, sizeof(cands[i].spot.time));
-                    strlcpy(cands[i].spot.comment, cmt,   sizeof(cands[i].spot.comment));
-                    cands[i].spot.dist_km = (gotLoc && dist < 65535.0f)
-                                          ? (uint16_t)dist : 0;
-                }
-                dup = true;
-                break;
-            }
-        }
-        if (dup) continue;
-
-        DXSpot& s = cands[nc].spot;
-        strlcpy(s.dx,      dx,    sizeof(s.dx));
-        strlcpy(s.spotter, spt,   sizeof(s.spotter));
-        s.freq = fr;
-        strlcpy(s.comment, cmt,   sizeof(s.comment));
-        strlcpy(s.time,    tmBuf, sizeof(s.time));
-        s.dist_km    = (gotLoc && dist < 65535.0f) ? (uint16_t)dist : 0;
-        s.dx_dist_km = dxDistKm;
-        s.dx_bearing = dxBear;
-        cands[nc].dist = dist;
-        nc++;
-    }
-
-    if (nc == 0) { Serial.println("[dx] no valid spots"); return; }
+    if (nc == 0) { Serial.println("[dx] no valid spots"); g_fetchState[FSRC_DX] = FS_FAIL; return; }
 
     // Insertion-sort by distance (nearest first; unknowns at end).
     for (int i = 1; i < nc; i++) {
-        Cand tmp = cands[i];
+        DXCand tmp = cands[i];
         int  j   = i - 1;
         while (j >= 0 && cands[j].dist > tmp.dist) {
             cands[j + 1] = cands[j];
@@ -1284,7 +1482,8 @@ void fetchDXSpots() {
     xSemaphoreTake(g_dataMutex, portMAX_DELAY);
     g_dxSpots = ds;
     xSemaphoreGive(g_dataMutex);
-    Serial.printf("[dx] OK  %d spots (from %d unique)\n", ds.count, nc);
+    g_fetchState[FSRC_DX] = FS_OK;
+    LOG("[dx] OK  %d spots (from %d unique)\n", ds.count, nc);
 }
 
 // ─── ISS position + orbit track ───────────────────────────────────────────────
@@ -1300,12 +1499,19 @@ void fetchDXSpots() {
 // Two consecutive lat readings determine ascending/descending so the correct
 // quadrant of the argument-of-latitude u₀ can be selected.
 void fetchISS() {
-    String body = httpGet(API_ISS, 512);
-    if (body.isEmpty()) return;
+    g_fetchState[FSRC_ISS] = FS_ACTIVE;
+    // ~200-byte response — a fixed stack buffer beats any streaming parser.
+    char issBuf[512];
+    if (!httpFetchText(API_ISS, issBuf, sizeof(issBuf), "iss")) {
+        g_fetchState[FSRC_ISS] = FS_FAIL; return;
+    }
+    String body(issBuf);
 
     int latIdx = body.indexOf("\"latitude\"");
     int lonIdx = body.indexOf("\"longitude\"");
-    if (latIdx < 0 || lonIdx < 0) return;
+    // Was a bare return, which left the source stuck ACTIVE forever on a
+    // malformed response instead of retrying at the failure interval.
+    if (latIdx < 0 || lonIdx < 0) { g_fetchState[FSRC_ISS] = FS_FAIL; return; }
 
     auto parseVal = [&](int keyIdx) -> float {
         int colon = body.indexOf(':', keyIdx);
@@ -1352,10 +1558,14 @@ void fetchISS() {
 
     // ── Generate 32-point ground track at 180 s intervals (~96 min) ──────────
     ISSData iss;
-    iss.valid      = true;
-    iss.lat        = lat;
-    iss.lon        = lon;
-    iss.trackCount = 32;
+    iss.valid        = true;
+    iss.lat          = lat;
+    iss.lon          = lon;
+    iss.trackCount   = 32;
+    iss.orbitEpoch   = (int32_t)time(nullptr);
+    iss.orbitU0      = u0;
+    iss.orbitLambda0 = lambda0;
+    iss.orbitLon0    = lon;
 
     for (int k = 0; k < iss.trackCount; k++) {
         const float dt = k * 180.0f;
@@ -1434,7 +1644,54 @@ void fetchISS() {
                 iss.passRiseAz  = (int16_t)roundf(riseAz);
                 iss.passSetAz   = (int16_t)roundf(az);
                 iss.passMaxEl   = (int8_t)roundf(maxEl);
+
+                // Recompute ISS position at pass midpoint for illumination check
+                {
+                    float mDt  = (float)((riseStep + step) / 2);
+                    float mU   = u0 + N * mDt;
+                    float mLat = asinf(constrain(sinf(INC)*sinf(mU), -1.0f, 1.0f));
+                    float mDLam = atan2f(cosf(INC)*sinf(mU), cosf(mU)) - lambda0;
+                    float mLonD = lon + mDLam * 180.0f / (float)M_PI - EARTH_W * mDt;
+                    while (mLonD >  180.0f) mLonD -= 360.0f;
+                    while (mLonD < -180.0f) mLonD += 360.0f;
+                    iss.passMidLat = mLat * 180.0f / (float)M_PI;
+                    iss.passMidLon = mLonD;
+                }
                 break;
+            }
+        }
+
+        // ── Current azimuth/elevation + range rate (valid when passNow) ─────
+        {
+            float issLatR = iss.lat * D2R;
+            float issLonR = iss.lon * D2R;
+            float cosRho  = constrain(
+                sinf(qLat)*sinf(issLatR) + cosf(qLat)*cosf(issLatR)*cosf(issLonR - qLon),
+                -1.0f, 1.0f);
+            float slant0 = sqrtf(RE*RE + (RE+ALT)*(RE+ALT) - 2.0f*RE*(RE+ALT)*cosRho);
+            iss.currentEl = asinf(((RE+ALT)*cosRho - RE) / slant0) * 180.0f / (float)M_PI;
+            float dLon    = issLonR - qLon;
+            float az      = atan2f(sinf(dLon)*cosf(issLatR),
+                                   cosf(qLat)*sinf(issLatR) - sinf(qLat)*cosf(issLatR)*cosf(dLon))
+                            * 180.0f / (float)M_PI;
+            if (az < 0.0f) az += 360.0f;
+            iss.currentAz = az;
+
+            // Range rate via 1-second numerical differentiation (km/s, +ve = approaching)
+            {
+                const float dt1 = 1.0f;
+                float u1   = u0 + N * dt1;
+                float lat1 = asinf(constrain(sinf(INC)*sinf(u1), -1.0f, 1.0f));
+                float dLam1 = atan2f(cosf(INC)*sinf(u1), cosf(u1)) - lambda0;
+                float lon1D = lon + dLam1 * 180.0f / (float)M_PI - EARTH_W * dt1;
+                while (lon1D >  180.0f) lon1D -= 360.0f;
+                while (lon1D < -180.0f) lon1D += 360.0f;
+                float lon1R = lon1D * D2R;
+                float cosRho1 = constrain(
+                    sinf(qLat)*sinf(lat1) + cosf(qLat)*cosf(lat1)*cosf(lon1R - qLon),
+                    -1.0f, 1.0f);
+                float slant1 = sqrtf(RE*RE + (RE+ALT)*(RE+ALT) - 2.0f*RE*(RE+ALT)*cosRho1);
+                iss.rangeRateKmps = (slant0 - slant1) / dt1;   // +ve = approaching
             }
         }
     }
@@ -1442,7 +1699,8 @@ void fetchISS() {
     xSemaphoreTake(g_dataMutex, portMAX_DELAY);
     g_iss = iss;
     xSemaphoreGive(g_dataMutex);
-    Serial.printf("[iss] lat=%.2f  lon=%.2f  %s  track=%d pts\n",
+    g_fetchState[FSRC_ISS] = FS_OK;
+    LOG("[iss] lat=%.2f  lon=%.2f  %s  track=%d pts\n",
                   lat, lon, ascending ? "asc" : "desc", iss.trackCount);
 }
 
@@ -1450,15 +1708,39 @@ void fetchISS() {
 // api2.sota.org.uk/api/spots/30 — last 30 SOTA activations.
 // No lat/lon in the response; distance is estimated by stripping the portable
 // suffix (/P, /M, /QRP…) from the activator callsign and using pfxToLatLon().
+// Parses straight off the socket.  The raw response is ~20 KB, but the filter
+// keeps only the seven fields actually used, so the document stays a few KB and
+// no whole-body buffer ever exists.  This is what the old 24576-byte String was
+// for — and what silently truncated into "IncompleteInput" when it could not grow.
+static bool sotaConsume(HTTPClient& http, void* ctx) {
+    JsonDocument& doc = *(JsonDocument*)ctx;
+
+    JsonDocument filter;
+    JsonObject f = filter.add<JsonObject>();   // array-of-objects filter shape
+    f["activatorCallsign"] = true;
+    f["associationCode"]   = true;
+    f["summitCode"]        = true;
+    f["summitDetails"]     = true;
+    f["frequency"]         = true;
+    f["mode"]              = true;
+    f["timeStamp"]         = true;
+
+    DeserializationError err = deserializeJson(
+        doc, *http.getStreamPtr(), DeserializationOption::Filter(filter));
+    if (err) { LOG("[sota] JSON: %s\n", err.c_str()); return false; }
+    return true;
+}
+
 void fetchSOTASpots() {
-    String body = httpGet(API_SOTASPOTS, 16384);
-    if (body.isEmpty()) return;
+    g_fetchState[FSRC_SOTA] = FS_ACTIVE;
 
     JsonDocument doc;
-    DeserializationError err = deserializeJson(doc, body);
-    if (err) { Serial.printf("[sota] JSON: %s\n", err.c_str()); return; }
+    if (!httpStream(API_SOTASPOTS, sotaConsume, &doc, "sota")) {
+        g_fetchState[FSRC_SOTA] = FS_FAIL;
+        return;
+    }
 
-    if (!doc.is<JsonArray>()) { Serial.println("[sota] expected array"); return; }
+    if (!doc.is<JsonArray>()) { Serial.println("[sota] expected array"); g_fetchState[FSRC_SOTA] = FS_FAIL; return; }
     JsonArray arr = doc.as<JsonArray>();
 
     struct SOTACand { SOTASpot spot; float dist; };
@@ -1554,7 +1836,7 @@ void fetchSOTASpots() {
         nc++;
     }
 
-    if (nc == 0) { Serial.println("[sota] no valid spots"); return; }
+    if (nc == 0) { Serial.println("[sota] no valid spots"); g_fetchState[FSRC_SOTA] = FS_FAIL; return; }
 
     // Insertion-sort nearest first.
     for (int i = 1; i < nc; i++) {
@@ -1572,7 +1854,8 @@ void fetchSOTASpots() {
     xSemaphoreTake(g_dataMutex, portMAX_DELAY);
     g_sotaSpots = ds;
     xSemaphoreGive(g_dataMutex);
-    Serial.printf("[sota] OK  %d spots (from %d)\n", ds.count, nc);
+    g_fetchState[FSRC_SOTA] = FS_OK;
+    LOG("[sota] OK  %d spots (from %d)\n", ds.count, nc);
 }
 
 // ─── POTA Spots ───────────────────────────────────────────────────────────────
@@ -1646,128 +1929,109 @@ static void potaGetField(const char* obj, const char* key, char* out, int outLen
     }
 }
 
-void fetchPOTASpots() {
-    struct POTACand { POTASpot spot; float dist; };
-    static POTACand cands[100];
-    static char     objBuf[2048];
-    int  nc      = 0;
-    bool streamOk = false;
+// File scope so the streaming consumer can reach it; static so 100 x POTASpot
+// stays off the fetch task stack.
+struct POTACand { POTASpot spot; float dist; };
+static POTACand potaCands[100];
+struct POTACtx  { int nc; bool streamOk; };
 
-    for (int attempt = 1; attempt <= 3; attempt++) {
-        if (!ensureWiFi()) { if (attempt < 3) delay(2000); continue; }
-        Serial.printf("[fetch] heap=%u lb8bit=%u  attempt %d/3  %s\n",
-                      ESP.getFreeHeap(),
-                      heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
-                      attempt, API_POTASPOTS);
+// POTA already parsed one JSON object at a time; this keeps that loop verbatim
+// and only replaces the hand-rolled SSL choreography around it with httpStream.
+static bool potaConsume(HTTPClient& http, void* ctx) {
+    POTACtx& st = *(POTACtx*)ctx;
+    static char objBuf[2048];
 
-        nc = 0;
-        sslCtxRelease();
-        {
-            WiFiClientSecure sc;                // sslclient_context → ctx slot ✓
-            sslDataRelease();                   // in/out/x509 slots freed
-            sc.setInsecure();
-            {
-                HTTPClient http;
-                http.begin(sc, API_POTASPOTS);
-                http.setTimeout(20000);
-                http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
-                http.addHeader("User-Agent", "CYD-Dashboard/1.0 ESP32");
-                http.addHeader("Connection", "close");
-                int code = http.GET();
-                if (code != HTTP_CODE_OK) {
-                    Serial.printf("[pota] HTTP %d\n", code);
-                    http.end();
-                } else {
-                    // Stream parse: one object at a time — no large heap alloc.
-                    WiFiClient* stream = http.getStreamPtr();
-                    int objLen;
-                    while ((objLen = potaReadObj(stream, objBuf, sizeof(objBuf))) != -1) {
-                        if (objLen == 0) { streamOk = true; break; }  // ']' seen
-                        if (objLen < 0) continue;                      // oversized, skip
+    WiFiClient* stream = http.getStreamPtr();
+    int objLen;
+    while ((objLen = potaReadObj(stream, objBuf, sizeof(objBuf))) != -1) {
+        if (objLen == 0) { st.streamOk = true; break; }  // ']' seen
+        if (objLen < 0) continue;                        // oversized, skip
 
-                        char act[14], ref[10], name[32], freq[12], mode[6];
-                        char tm[24], latS[14], lonS[14];
-                        potaGetField(objBuf, "activator", act,  sizeof(act));
-                        potaGetField(objBuf, "reference", ref,  sizeof(ref));
-                        potaGetField(objBuf, "name",      name, sizeof(name));
-                        potaGetField(objBuf, "frequency", freq, sizeof(freq));
-                        potaGetField(objBuf, "mode",      mode, sizeof(mode));
-                        potaGetField(objBuf, "spotTime",  tm,   sizeof(tm));
-                        potaGetField(objBuf, "latitude",  latS, sizeof(latS));
-                        potaGetField(objBuf, "longitude", lonS, sizeof(lonS));
+        char act[14], ref[10], name[32], freq[12], mode[6];
+        char tm[24], latS[14], lonS[14];
+        potaGetField(objBuf, "activator", act,  sizeof(act));
+        potaGetField(objBuf, "reference", ref,  sizeof(ref));
+        potaGetField(objBuf, "name",      name, sizeof(name));
+        potaGetField(objBuf, "frequency", freq, sizeof(freq));
+        potaGetField(objBuf, "mode",      mode, sizeof(mode));
+        potaGetField(objBuf, "spotTime",  tm,   sizeof(tm));
+        potaGetField(objBuf, "latitude",  latS, sizeof(latS));
+        potaGetField(objBuf, "longitude", lonS, sizeof(lonS));
 
-                        float fr = atof(freq);
-                        if (!act[0] || fr < 1.0f) continue;
+        float fr = atof(freq);
+        if (!act[0] || fr < 1.0f) continue;
 
-                        float lat = atof(latS), lon = atof(lonS);
-                        bool  gotLoc = (latS[0] && lonS[0] && (lat != 0.0f || lon != 0.0f));
-                        float dist   = gotLoc
-                                     ? gcKm(g_settings.lat, g_settings.lon, lat, lon)
-                                     : 1e9f;
+        float lat = atof(latS), lon = atof(lonS);
+        bool  gotLoc = (latS[0] && lonS[0] && (lat != 0.0f || lon != 0.0f));
+        float dist   = gotLoc
+                     ? gcKm(g_settings.lat, g_settings.lon, lat, lon)
+                     : 1e9f;
 
-                        // Convert "2026-05-26T11:07:54" → "11:07Z"
-                        char tmBuf[8] = "";
-                        const char* tptr = strchr(tm, 'T');
-                        if (tptr && strlen(tptr) >= 6)
-                            snprintf(tmBuf, sizeof(tmBuf), "%.5sZ", tptr + 1);
-                        else
-                            strlcpy(tmBuf, tm, sizeof(tmBuf));
+        // Convert "2026-05-26T11:07:54" -> "11:07Z"
+        char tmBuf[8] = "";
+        const char* tptr = strchr(tm, 'T');
+        if (tptr && strlen(tptr) >= 6)
+            snprintf(tmBuf, sizeof(tmBuf), "%.5sZ", tptr + 1);
+        else
+            strlcpy(tmBuf, tm, sizeof(tmBuf));
 
-                        // Deduplicate by activator — keep closest.
-                        bool dup = false;
-                        for (int i = 0; i < nc; i++) {
-                            if (strcasecmp(cands[i].spot.activator, act) == 0) {
-                                if (dist < cands[i].dist) {
-                                    cands[i].dist = dist;
-                                    strlcpy(cands[i].spot.time, tmBuf, sizeof(cands[i].spot.time));
-                                    cands[i].spot.dist_km = (gotLoc && dist < 65535.0f)
-                                                          ? (uint16_t)dist : 0;
-                                }
-                                dup = true; break;
-                            }
-                        }
-                        if (dup || nc >= 100) continue;
-
-                        POTASpot& s = cands[nc].spot;
-                        strlcpy(s.activator, act,  sizeof(s.activator));
-                        strlcpy(s.reference, ref,  sizeof(s.reference));
-                        strlcpy(s.parkName,  name, sizeof(s.parkName));
-                        s.freq = fr;
-                        strlcpy(s.mode, mode, sizeof(s.mode));
-                        strlcpy(s.time, tmBuf, sizeof(s.time));
-                        s.dist_km = (gotLoc && dist < 65535.0f) ? (uint16_t)dist : 0;
-                        cands[nc].dist = dist;
-                        nc++;
-                    }
-                    http.end();
+        // Deduplicate by activator — keep closest.
+        bool dup = false;
+        for (int i = 0; i < st.nc; i++) {
+            if (strcasecmp(potaCands[i].spot.activator, act) == 0) {
+                if (dist < potaCands[i].dist) {
+                    potaCands[i].dist = dist;
+                    strlcpy(potaCands[i].spot.time, tmBuf, sizeof(potaCands[i].spot.time));
+                    potaCands[i].spot.dist_km = (gotLoc && dist < 65535.0f)
+                                              ? (uint16_t)dist : 0;
                 }
-            }                                   // http destroyed
-        }                                       // sc destroyed
-        sslAllReclaim();
+                dup = true; break;
+            }
+        }
+        if (dup || st.nc >= 100) continue;
 
-        if (streamOk || nc > 0) break;
-        if (attempt < 3) delay(2000);
+        POTASpot& s = potaCands[st.nc].spot;
+        strlcpy(s.activator, act,  sizeof(s.activator));
+        strlcpy(s.reference, ref,  sizeof(s.reference));
+        strlcpy(s.parkName,  name, sizeof(s.parkName));
+        s.freq = fr;
+        strlcpy(s.mode, mode, sizeof(s.mode));
+        strlcpy(s.time, tmBuf, sizeof(s.time));
+        s.dist_km = (gotLoc && dist < 65535.0f) ? (uint16_t)dist : 0;
+        potaCands[st.nc].dist = dist;
+        st.nc++;
     }
+    return st.streamOk || st.nc > 0;
+}
 
-    if (nc == 0) { Serial.println("[pota] no valid spots"); return; }
+void fetchPOTASpots() {
+    g_fetchState[FSRC_POTA] = FS_ACTIVE;
+
+    POTACtx st = { 0, false };
+    httpStream(API_POTASPOTS, potaConsume, &st, "pota");
+    const int nc = st.nc;
+
+
+    if (nc == 0) { Serial.println("[pota] no valid spots"); g_fetchState[FSRC_POTA] = FS_FAIL; return; }
 
     // Insertion-sort nearest first.
     for (int i = 1; i < nc; i++) {
-        POTACand tmp = cands[i];
+        POTACand tmp = potaCands[i];
         int j = i - 1;
-        while (j >= 0 && cands[j].dist > tmp.dist) { cands[j + 1] = cands[j]; j--; }
-        cands[j + 1] = tmp;
+        while (j >= 0 && potaCands[j].dist > tmp.dist) { potaCands[j + 1] = potaCands[j]; j--; }
+        potaCands[j + 1] = tmp;
     }
 
     POTASpotsData ds;
     ds.valid = true;
     ds.count = (uint8_t)min(nc, POTA_SPOTS_MAX);
-    for (int i = 0; i < ds.count; i++) ds.spots[i] = cands[i].spot;
+    for (int i = 0; i < ds.count; i++) ds.spots[i] = potaCands[i].spot;
 
     xSemaphoreTake(g_dataMutex, portMAX_DELAY);
     g_potaSpots = ds;
     xSemaphoreGive(g_dataMutex);
-    Serial.printf("[pota] OK  %d spots (from %d)\n", ds.count, nc);
+    g_fetchState[FSRC_POTA] = FS_OK;
+    LOG("[pota] OK  %d spots (from %d)\n", ds.count, nc);
 }
 
 // ─── Contest Calendar ─────────────────────────────────────────────────────────
@@ -1868,87 +2132,96 @@ static bool cxParseTimes(const String& desc, time_t& tStart, time_t& tEnd) {
     return (tStart > 0 && tEnd >= tStart);
 }
 
-void fetchContests() {
-    String body = httpGet(API_CONTESTS, 32768);
-    if (body.isEmpty()) return;
+// Two buckets: active (up to CONTEST_MAX) and upcoming (up to CONTEST_MAX).
+// File scope so the streaming block handler can reach them, static so they stay
+// off the fetch task stack.
+struct CxEntry { Contest c; time_t tStart; };
+static CxEntry cxActive[CONTEST_MAX], cxUpcoming[CONTEST_MAX];
+struct CxCtx  { time_t now; int nActive; int nUpcoming; };
 
-    if (body.indexOf("<item>") < 0) {
-        Serial.println("[cx] no <item> elements");
+// One RSS <item>...</item>, handed over as it arrives.  Body unchanged from the
+// old whole-body loop; only the source of `blk` differs.
+static void cxOnBlock(const char* blockStr, void* ctx) {
+    CxCtx& st = *(CxCtx*)ctx;
+    if (st.nActive + st.nUpcoming >= CONTEST_MAX * 2) return;
+
+    String blk(blockStr);
+
+    String title = decodeHtmlEntities(xmlGet(blk, "title"));
+    String desc  = decodeHtmlEntities(xmlGet(blk, "description"));
+    String link  = xmlGet(blk, "link");
+    title.trim(); desc.trim(); link.trim();
+    if (title.isEmpty() || desc.isEmpty()) return;
+
+    time_t tStart, tEnd;
+    if (!cxParseTimes(desc, tStart, tEnd)) return;
+    if (tEnd <= st.now) return;  // already finished
+
+    bool isActive = (st.now >= tStart && st.now < tEnd);
+
+    // Fill a Contest entry.
+    CxEntry cx;
+    strlcpy(cx.c.name,  title.c_str(), sizeof(cx.c.name));
+    strlcpy(cx.c.times, desc.c_str(),  sizeof(cx.c.times));
+    cx.c.ref[0] = '\0';
+    { int ri = link.indexOf("ref=");
+      if (ri >= 0) strlcpy(cx.c.ref, link.c_str() + ri + 4, sizeof(cx.c.ref)); }
+    cx.c.active = isActive;
+    cx.tStart   = tStart;
+
+    if (isActive && st.nActive < CONTEST_MAX) {
+        cxActive[st.nActive++] = cx;
+    } else if (!isActive && st.nUpcoming < CONTEST_MAX) {
+        cxUpcoming[st.nUpcoming++] = cx;
+    }
+}
+
+static bool cxConsume(HTTPClient& http, void* ctx) {
+    char blockBuf[1024];        // one RSS <item>, description included
+    int n = scanBlocks(http, "<item>", "</item>", cxOnBlock, ctx,
+                       blockBuf, sizeof(blockBuf));
+    if (n == 0) Serial.println("[cx] no <item> elements");
+    return n > 0;
+}
+
+void fetchContests() {
+    g_fetchState[FSRC_CONTESTS] = FS_ACTIVE;
+
+    CxCtx st = { time(NULL), 0, 0 };
+    if (!httpStream(API_CONTESTS, cxConsume, &st, "cx")) {
+        g_fetchState[FSRC_CONTESTS] = FS_FAIL;
         return;
     }
+    const int nActive   = st.nActive;
+    int       nUpcoming = st.nUpcoming;
 
-    time_t now = time(NULL);
-
-    // Two buckets: active (up to CONTEST_MAX) and upcoming (up to CONTEST_MAX).
-    // We merge them (active first) before storing.
-    struct CxEntry { Contest c; time_t tStart; };
-    static CxEntry active[CONTEST_MAX], upcoming[CONTEST_MAX];
-    int nActive = 0, nUpcoming = 0;
-
-    int searchFrom = 0;
-    while (nActive + nUpcoming < CONTEST_MAX * 2) {
-        int s = body.indexOf("<item>", searchFrom);
-        if (s < 0) break;
-        int e = body.indexOf("</item>", s);
-        if (e < 0) break;
-        e += 7;
-        String blk = body.substring(s, e);
-        searchFrom = e;
-
-        String title = decodeHtmlEntities(xmlGet(blk, "title"));
-        String desc  = decodeHtmlEntities(xmlGet(blk, "description"));
-        String link  = xmlGet(blk, "link");
-        title.trim(); desc.trim(); link.trim();
-        if (title.isEmpty() || desc.isEmpty()) continue;
-
-        time_t tStart, tEnd;
-        if (!cxParseTimes(desc, tStart, tEnd)) continue;
-        if (tEnd <= now) continue;  // already finished
-
-        bool isActive = (now >= tStart && now < tEnd);
-
-        // Fill a Contest entry.
-        CxEntry cx;
-        strlcpy(cx.c.name,  title.c_str(), sizeof(cx.c.name));
-        strlcpy(cx.c.times, desc.c_str(),  sizeof(cx.c.times));
-        cx.c.ref[0] = '\0';
-        { int ri = link.indexOf("ref=");
-          if (ri >= 0) strlcpy(cx.c.ref, link.c_str() + ri + 4, sizeof(cx.c.ref)); }
-        cx.c.active = isActive;
-        cx.tStart   = tStart;
-
-        if (isActive && nActive < CONTEST_MAX) {
-            active[nActive++] = cx;
-        } else if (!isActive && nUpcoming < CONTEST_MAX) {
-            upcoming[nUpcoming++] = cx;
-        }
-    }
 
     // Insertion-sort upcoming by start time (RSS is roughly chronological,
     // but sort to be safe).
     for (int i = 1; i < nUpcoming; i++) {
-        CxEntry tmp = upcoming[i];
+        CxEntry tmp = cxUpcoming[i];
         int j = i - 1;
-        while (j >= 0 && upcoming[j].tStart > tmp.tStart) {
-            upcoming[j + 1] = upcoming[j];
+        while (j >= 0 && cxUpcoming[j].tStart > tmp.tStart) {
+            cxUpcoming[j + 1] = cxUpcoming[j];
             j--;
         }
-        upcoming[j + 1] = tmp;
+        cxUpcoming[j + 1] = tmp;
     }
 
     int total = nActive + nUpcoming;
-    if (total == 0) { Serial.println("[cx] no current/upcoming contests"); return; }
+    if (total == 0) { Serial.println("[cx] no current/upcoming contests"); g_fetchState[FSRC_CONTESTS] = FS_FAIL; return; }
 
     ContestData cd;
     cd.valid = true;
     cd.count = (uint8_t)min(total, CONTEST_MAX);
-    for (int i = 0; i < nActive   && i < CONTEST_MAX; i++) cd.items[i]          = active[i].c;
-    for (int i = 0; i < nUpcoming && nActive + i < CONTEST_MAX; i++) cd.items[nActive + i] = upcoming[i].c;
+    for (int i = 0; i < nActive   && i < CONTEST_MAX; i++) cd.items[i]          = cxActive[i].c;
+    for (int i = 0; i < nUpcoming && nActive + i < CONTEST_MAX; i++) cd.items[nActive + i] = cxUpcoming[i].c;
 
     xSemaphoreTake(g_dataMutex, portMAX_DELAY);
     g_contests = cd;
     xSemaphoreGive(g_dataMutex);
-    Serial.printf("[cx] OK  %d active  %d upcoming\n", nActive, min(nUpcoming, CONTEST_MAX - nActive));
+    g_fetchState[FSRC_CONTESTS] = FS_OK;
+    LOG("[cx] OK  %d active  %d upcoming\n", nActive, min(nUpcoming, CONTEST_MAX - nActive));
 }
 
 static void extractTableField(const String& html, const char* label, char* out, int outLen) {
@@ -1991,8 +2264,17 @@ void fetchContestDetail() {
     snprintf(url, sizeof(url),
              "https://www.contestcalendar.com/weeklycontdetails.php?ref=%s", c.ref);
     Serial.printf("[cx-detail] fetching %s\n", url);
-    String html = httpGet(url, 8192);
-    if (html.isEmpty()) { setFailed("fetch failed"); return; }
+    // Single detail page — one bounded allocation, released once parsed.
+    const size_t CX_CAP = 8192;
+    char* hbuf = (char*)malloc(CX_CAP);
+    if (!hbuf) { setFailed("out of memory"); return; }
+    if (!httpFetchText(url, hbuf, CX_CAP, "cx-detail")) {
+        free(hbuf);
+        setFailed("fetch failed");
+        return;
+    }
+    String html(hbuf);
+    free(hbuf);
 
     ContestDetail d = {};
     strlcpy(d.name, c.name, sizeof(d.name));
@@ -2034,47 +2316,31 @@ void fetchTzLookup() {
              "https://api.open-meteo.com/v1/forecast"
              "?latitude=%.4f&longitude=%.4f&current=temperature_2m&timezone=auto",
              lat, lon);
-    Serial.printf("[tz-lookup] fetching %s\n", url);
+    LOG("[tz-lookup] fetching %s\n", url);
 
-    // Open-Meteo always responds with chunked Transfer-Encoding, so this can't
-    // use the shared httpGet() helper (its streamReadText() assumes
-    // Content-Length framing and would corrupt the body with raw chunk-size
-    // headers). http.getString() de-chunks automatically — same approach as
-    // fetchWeather() below.
+    // Open-Meteo always responds with chunked Transfer-Encoding, so this cannot
+    // use the streaming scanners — getStreamPtr() would expose raw "HEX\r\n"
+    // chunk headers.  getString() de-chunks; same treatment as fetchWeather().
     String body;
-    {
-        if (!ensureWiFi()) { setResult(true, -1); return; }
-        sslCtxRelease();
-        {
-            WiFiClientSecure sc;
-            sslDataRelease();
-            sc.setInsecure();
-            {
-                HTTPClient http;
-                http.begin(sc, url);
-                http.setTimeout(20000);
-                http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
-                http.addHeader("User-Agent", "CYD-Dashboard/1.0 ESP32");
-                http.addHeader("Connection", "close");
-                int code = http.GET();
-                if (code == HTTP_CODE_OK) body = http.getString();
-                http.end();
-            }
-        }
-        sslAllReclaim();
-    }
+    httpStream(url,
+        [](HTTPClient& http, void* ctx) -> bool {
+            String& b = *(String*)ctx;
+            b = http.getString();
+            return b.length() > 0;
+        },
+        &body, "tz-lookup", 1);   // one-shot: user is waiting on this
     if (body.isEmpty()) { Serial.println("[tz-lookup] fetch failed"); setResult(true, -1); return; }
 
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, body);
-    if (err) { Serial.printf("[tz-lookup] JSON: %s\n", err.c_str()); setResult(true, -1); return; }
+    if (err) { LOG("[tz-lookup] JSON: %s\n", err.c_str()); setResult(true, -1); return; }
 
     const char* iana = doc["timezone"] | "";
-    Serial.printf("[tz-lookup] iana=%s\n", iana);
+    LOG("[tz-lookup] iana=%s\n", iana);
     int idx = tzFindByIana(iana);
     if (idx < 0) { Serial.println("[tz-lookup] no match"); setResult(true, -1); return; }
 
-    Serial.printf("[tz-lookup] matched %s\n", TZ_LIST[idx].name);
+    LOG("[tz-lookup] matched %s\n", TZ_LIST[idx].name);
     setResult(false, idx);
 }
 
@@ -2094,103 +2360,157 @@ static bool pskGetAttr(const char* tag, const char* attr, char* out, int outLen)
     return i > 0;
 }
 
+// Per-report handler for the streaming scanner.  Called once per
+// <receptionReport> element as it arrives off the wire.
+static void pskOnTag(const char* tag, void* ctx) {
+    PSKData& nd = *(PSKData*)ctx;
+
+    // Inner reports have receiverLocator; the outer wrapper element does not
+    char locator[8] = "";
+    if (!pskGetAttr(tag, "receiverLocator", locator, sizeof(locator))) return;
+
+    nd.total++;
+    if (nd.count >= PSK_REPORTS_MAX) return;
+
+    PSKReport& r = nd.reports[nd.count];
+    memset(&r, 0, sizeof(r));
+
+    char freqStr[16] = "";
+    char snrStr[8]   = "";
+    pskGetAttr(tag, "receiverCallsign", r.call,  sizeof(r.call));
+    pskGetAttr(tag, "frequency",        freqStr, sizeof(freqStr));
+    pskGetAttr(tag, "sNR",              snrStr,  sizeof(snrStr));
+
+    strlcpy(r.grid, locator, sizeof(r.grid));
+    gridToLatLon(locator, r.lat, r.lon);
+    r.freqMHz = (float)atof(freqStr) / 1e6f;
+    r.snr     = (int8_t)atoi(snrStr);
+    nd.count++;
+}
+
+static bool pskConsume(HTTPClient& http, void* ctx) {
+    char tagBuf[512];
+    scanTags(http, "<receptionReport ", pskOnTag, ctx, tagBuf, sizeof(tagBuf));
+    return true;   // HTTP 200 with zero reports is still a valid answer
+}
+
 void fetchPSKReporter() {
     if (!g_settings.callsign[0]) return;
 
     char url[160];
     snprintf(url, sizeof(url), API_PSKREPORTER, g_settings.callsign);
 
-    Serial.printf("[psk] fetching for %s\n", g_settings.callsign);
-    String xml = httpGet(url, 32768);
-    Serial.printf("[psk] body=%d bytes\n", xml.length());
-    if (xml.isEmpty()) {
-        Serial.println("[psk] fetch failed or empty");
+    g_fetchState[FSRC_PSK] = FS_ACTIVE;
+    LOG("[psk] fetching for %s\n", g_settings.callsign);
+
+    PSKData nd = {};
+    if (!httpStream(url, pskConsume, &nd, "psk")) {
+        Serial.println("[psk] fetch failed");
         xSemaphoreTake(g_dataMutex, portMAX_DELAY);
         g_pskData.fetchFailed = true;
         xSemaphoreGive(g_dataMutex);
+        g_fetchState[FSRC_PSK] = FS_FAIL;
         return;
-    }
-    // Print first 120 chars so the serial log shows whether we got XML or an
-    // error/redirect page — helps diagnose server-side 503/redirect issues.
-    {
-        char preview[121];
-        int plen = xml.length() < 120 ? xml.length() : 120;
-        strncpy(preview, xml.c_str(), plen);
-        preview[plen] = '\0';
-        // Replace newlines/CRs with spaces for compact log output
-        for (int i = 0; i < plen; i++) if (preview[i] < 0x20) preview[i] = ' ';
-        Serial.printf("[psk] start: %s\n", preview);
-    }
-
-    PSKData nd = {};
-
-    const char* TAG = "<receptionReport ";
-    const char* p = xml.c_str();
-
-    while ((p = strstr(p, TAG)) != nullptr) {
-        p += 17; // skip past "<receptionReport "
-
-        // Copy the tag body into a bounded buffer so pskGetAttr() can't
-        // stray into the next tag.  Each PSK report tag is ~200–300 bytes.
-        // Prepend a space so pskGetAttr's " attr=\"" pattern matches even the
-        // very first attribute in the tag.
-        char tagBuf[512] = {};
-        tagBuf[0] = ' ';
-        int  len = 1;
-        const char* q = p;
-        bool inStr = false; char strC = 0;
-        while (*q && len < (int)(sizeof(tagBuf) - 1)) {
-            if (inStr) {
-                if (*q == strC) inStr = false;
-            } else {
-                if (*q == '"' || *q == '\'') { inStr = true; strC = *q; }
-                else if (*q == '>') break;
-            }
-            tagBuf[len++] = *q++;
-        }
-        tagBuf[len] = '\0';
-
-        // Inner reports have receiverLocator; the outer wrapper element does not
-        char locator[8] = "";
-        if (!pskGetAttr(tagBuf, "receiverLocator", locator, sizeof(locator))) continue;
-
-        nd.total++;
-
-        if (nd.count < PSK_REPORTS_MAX) {
-            PSKReport& r = nd.reports[nd.count];
-            memset(&r, 0, sizeof(r));
-
-            char freqStr[16] = "";
-            char snrStr[8]   = "";
-
-            pskGetAttr(tagBuf, "receiverCallsign", r.call,    sizeof(r.call));
-            pskGetAttr(tagBuf, "frequency",        freqStr,   sizeof(freqStr));
-            pskGetAttr(tagBuf, "sNR",              snrStr,    sizeof(snrStr));
-
-            strlcpy(r.grid, locator, sizeof(r.grid));
-            gridToLatLon(locator, r.lat, r.lon);
-            r.freqMHz = (float)atof(freqStr) / 1e6f;
-            r.snr     = (int8_t)atoi(snrStr);
-            nd.count++;
-        }
     }
 
     // Mark valid as soon as we get any successful HTTP response — even with
     // zero reports.  The screen uses valid=false to mean "never fetched yet"
     // and shows "Fetching…"; valid=true with count=0 just shows a blank map.
     nd.valid = true;
-    if (nd.total > 0) {
-        Serial.printf("[psk] OK  %d reports total, %d stored\n", nd.total, nd.count);
-    } else {
-        // Either callsign wasn't heard in the last 15 min, or the XML has a
-        // different structure than expected.  The "[psk] start:" line above
-        // shows the raw response for diagnosis.
-        Serial.printf("[psk] 0 <receptionReport receiverLocator=...> tags found"
-                      " in %d-byte body\n", xml.length());
-    }
+    LOG("[psk] OK  %d reports total, %d stored\n", nd.total, nd.count);
 
     xSemaphoreTake(g_dataMutex, portMAX_DELAY);
     g_pskData = nd;
+    xSemaphoreGive(g_dataMutex);
+    g_fetchState[FSRC_PSK] = FS_OK;
+}
+
+// ─── FT8 Spots — what local stations are hearing ─────────────────────────────
+// Queries PSK Reporter by receiver grid square. Each <receptionReport> means a
+// local station heard the sender. We deduplicate by senderCallsign, keeping the
+// highest-SNR instance, so the map shows unique DX stations heard in the area.
+// Per-report handler for the streaming scanner.  Deduplicates by
+// senderCallsign, keeping the highest-SNR instance of each DX station.
+static void ft8OnTag(const char* tag, void* ctx) {
+    FT8SpotsData& nd = *(FT8SpotsData*)ctx;
+
+    // Must have a sender locator to place the dot on the map
+    char senderLoc[8] = "";
+    if (!pskGetAttr(tag, "senderLocator", senderLoc, sizeof(senderLoc))) return;
+
+    nd.total++;
+
+    char senderCall[14] = "";
+    char rxCall[14]     = "";
+    char freqStr[16]    = "";
+    char snrStr[8]      = "";
+    pskGetAttr(tag, "senderCallsign",   senderCall, sizeof(senderCall));
+    pskGetAttr(tag, "receiverCallsign", rxCall,     sizeof(rxCall));
+    pskGetAttr(tag, "frequency",        freqStr,    sizeof(freqStr));
+    pskGetAttr(tag, "sNR",              snrStr,     sizeof(snrStr));
+
+    if (!senderCall[0]) return;
+
+    float  freqMHz = (float)atof(freqStr) / 1e6f;
+    int8_t snr     = (int8_t)atoi(snrStr);
+
+    for (int i = 0; i < nd.count; i++) {
+        if (strcmp(nd.spots[i].senderCall, senderCall) == 0) {
+            if (snr > nd.spots[i].snr) {
+                nd.spots[i].snr = snr;
+                strlcpy(nd.spots[i].rxCall, rxCall, sizeof(nd.spots[i].rxCall));
+                nd.spots[i].freqMHz = freqMHz;
+            }
+            return;
+        }
+    }
+
+    if (nd.count < FT8_SPOTS_MAX) {
+        FT8Spot& s = nd.spots[nd.count];
+        memset(&s, 0, sizeof(s));
+        strlcpy(s.senderCall, senderCall, sizeof(s.senderCall));
+        strlcpy(s.senderGrid, senderLoc,  sizeof(s.senderGrid));
+        strlcpy(s.rxCall,     rxCall,     sizeof(s.rxCall));
+        gridToLatLon(senderLoc, s.lat, s.lon);
+        s.freqMHz = freqMHz;
+        s.snr     = snr;
+        nd.count++;
+    }
+}
+
+static bool ft8Consume(HTTPClient& http, void* ctx) {
+    char tagBuf[512];
+    scanTags(http, "<receptionReport ", ft8OnTag, ctx, tagBuf, sizeof(tagBuf));
+    return true;
+}
+
+void fetchFT8Spots() {
+    if (!g_settings.grid[0]) return;
+
+    // Use only the first 4 characters of the grid (e.g. "IO92" from "IO92js")
+    char grid4[5] = {};
+    strlcpy(grid4, g_settings.grid, 5);
+
+    char url[160];
+    snprintf(url, sizeof(url), API_FT8SPOTS, grid4);
+    g_fetchState[FSRC_FT8] = FS_ACTIVE;
+    LOG("[ft8] fetching for grid %s\n", grid4);
+
+    FT8SpotsData nd = {};
+    if (!httpStream(url, ft8Consume, &nd, "ft8")) {
+        xSemaphoreTake(g_dataMutex, portMAX_DELAY);
+        g_ft8Spots.fetchFailed = true;
+        xSemaphoreGive(g_dataMutex);
+        g_fetchState[FSRC_FT8] = FS_FAIL;
+        return;
+    }
+
+    nd.valid = true;
+    g_fetchState[FSRC_FT8] = FS_OK;
+    LOG("[ft8] %d unique DX stations from %d reports\n", nd.count, nd.total);
+
+    xSemaphoreTake(g_dataMutex, portMAX_DELAY);
+    g_ft8Spots = nd;
     xSemaphoreGive(g_dataMutex);
 }
 
@@ -2209,7 +2529,7 @@ void fetchTask(void* param) {
         xSemaphoreTake(ready, portMAX_DELAY);
         vSemaphoreDelete(ready);   // one-shot; release the handle
     }
-    Serial.printf("[fetch] started  largestDMA=%u  heap=%u\n",
+    LOG("[fetch] started  largestDMA=%u  heap=%u\n",
                   heap_caps_get_largest_free_block(MALLOC_CAP_DMA),
                   ESP.getFreeHeap());
 
@@ -2218,7 +2538,7 @@ void fetchTask(void* param) {
     // These guards are a last-resort fallback only.
     if (!g_bbcThumbBuf)   g_bbcThumbBuf   = (uint8_t*)malloc(THUMB_BUF_LEN);
     if (!g_appleThumbBuf) g_appleThumbBuf = (uint8_t*)malloc(THUMB_BUF_LEN);
-    Serial.printf("[fetch] started  bbc=%p apple=%p  largestDMA=%u  heap=%u\n",
+    LOG("[fetch] started  bbc=%p apple=%p  largestDMA=%u  heap=%u\n",
                   g_bbcThumbBuf, g_appleThumbBuf,
                   heap_caps_get_largest_free_block(MALLOC_CAP_DMA),
                   ESP.getFreeHeap());
@@ -2228,12 +2548,24 @@ void fetchTask(void* param) {
     bool issOk     = false, dxOk       = false;
     bool potaOk    = false, sotaOk     = false;
     bool contestOk = false, pskOk      = false;
+    bool ft8Ok     = false;
 
-    // ── Boot fetch: news + stocks first, then weather + solar + ISS + DX + POTA + SOTA + contests + PSK ──
+    // ── Boot fetch ────────────────────────────────────────────────────────────
     fetchBBCNews();   fetchAppleNews();   fetchTracker();
     fetchWeather();   fetchSolar();       fetchISS();
-    fetchDXSpots();   fetchPOTASpots();   fetchSOTASpots();   fetchContests();
-    fetchPSKReporter();
+    fetchDXSpots();   fetchPOTASpots();
+    // fetchPSKReporter() / fetchFT8Spots() deferred to task loop: each successful
+    // pskreporter.info connection leaves a 16 KB orphan TCP receive buffer ~30 s
+    // after close (server continues sending after the client reads and disconnects).
+    // Running them at boot fragments lb8bit from 34804 → 18420, which is below the
+    // 33434 B mbedTLS minimum, breaking all subsequent task-loop HTTPS connections.
+    fetchSOTASpots();
+#if !DIAG_NO_CONTESTS
+    fetchContests();
+#endif
+    // ContestCalendar re-enabled: CONFIG_MBEDTLS_HARDWARE_AES=n (platformio.ini)
+    // forces software AES, eliminating the PADLOCK misalignment that previously
+    // caused the orphan-buffer / ctx=FAIL crash.
 
     xSemaphoreTake(g_dataMutex, portMAX_DELAY);
     newsOk    = g_bbcNews.valid;
@@ -2246,6 +2578,7 @@ void fetchTask(void* param) {
     sotaOk    = g_sotaSpots.valid;
     contestOk = g_contests.valid;
     pskOk     = g_pskData.valid;
+    ft8Ok     = g_ft8Spots.valid;
     xSemaphoreGive(g_dataMutex);
 
     unsigned long lastNews    = millis();
@@ -2258,6 +2591,7 @@ void fetchTask(void* param) {
     unsigned long lastSOTA    = millis();
     unsigned long lastContest = millis();
     unsigned long lastPSK     = millis();
+    unsigned long lastFT8     = millis();
 
     for (;;) {
         unsigned long now = millis();
@@ -2316,14 +2650,15 @@ void fetchTask(void* param) {
             xSemaphoreGive(g_dataMutex);
             lastPOTA = millis();
         }
-        if (now - lastSOTA >= (sotaOk ? REFRESH_SOTASPOTS_MS : 30000UL)) {
+        if (now - lastSOTA >= (sotaOk ? REFRESH_SOTASPOTS_MS : 90000UL)) {
             fetchSOTASpots();
             xSemaphoreTake(g_dataMutex, portMAX_DELAY);
             sotaOk = g_sotaSpots.valid;
             xSemaphoreGive(g_dataMutex);
             lastSOTA = millis();
         }
-        if (now - lastContest >= (contestOk ? REFRESH_CONTESTS_MS : 90000UL)) {
+        if (!DIAG_NO_CONTESTS &&
+            now - lastContest >= (contestOk ? REFRESH_CONTESTS_MS : 90000UL)) {
             fetchContests();
             xSemaphoreTake(g_dataMutex, portMAX_DELAY);
             contestOk = g_contests.valid;
@@ -2336,6 +2671,14 @@ void fetchTask(void* param) {
             pskOk = g_pskData.valid;
             xSemaphoreGive(g_dataMutex);
             lastPSK = millis();
+            vTaskDelay(pdMS_TO_TICKS(500)); // let SSL cleanup before next HTTPS
+        }
+        if (now - lastFT8 >= (ft8Ok ? REFRESH_FT8_MS : 60000UL)) {
+            fetchFT8Spots();
+            xSemaphoreTake(g_dataMutex, portMAX_DELAY);
+            ft8Ok = g_ft8Spots.valid;
+            xSemaphoreGive(g_dataMutex);
+            lastFT8 = millis();
         }
         if (g_contestDetailReq >= 0) {
             fetchContestDetail();

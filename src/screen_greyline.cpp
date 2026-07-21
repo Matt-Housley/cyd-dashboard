@@ -7,6 +7,36 @@
 #include <math.h>
 #include "fonts/ui_fonts.h"
 
+// ─── ISS illumination helpers ────────────────────────────────────────────────
+// Compute subsolar longitude (degrees) and declination (radians) at a given UTC time.
+static void sunPosAt(time_t t, float& sunLonDeg, float& sunDecl) {
+    struct tm utm; gmtime_r(&t, &utm);
+    float utcH = utm.tm_hour + utm.tm_min / 60.0f + utm.tm_sec / 3600.0f;
+    sunLonDeg  = (utcH - 12.0f) * -15.0f;
+    float B    = (2.0f * (float)M_PI / 365.0f) * utm.tm_yday;
+    sunDecl    = 0.006918f
+               - 0.399912f * cosf(B) + 0.070257f * sinf(B)
+               - 0.006758f * cosf(2*B) + 0.000907f * sinf(2*B)
+               - 0.002697f * cosf(3*B) + 0.001480f * sinf(3*B);
+}
+
+// Sun elevation in degrees at (lat, lon) given precomputed sun position.
+static float sunElevAt(float lat, float lon, float sunLonDeg, float sunDecl) {
+    float latR = lat * (float)M_PI / 180.0f;
+    float dLon = (lon - sunLonDeg) * (float)M_PI / 180.0f;
+    return asinf(sinf(latR)*sinf(sunDecl) + cosf(latR)*cosf(sunDecl)*cosf(dLon))
+           * 180.0f / (float)M_PI;
+}
+
+// True when the ISS at (issLat, issLon) is in sunlight (not in Earth's shadow).
+// Threshold: cos(angle ISS–sun) > -RE/(RE+408 km) ≈ -0.9398
+static bool issIsSunlit(float issLat, float issLon, float sunLonDeg, float sunDecl) {
+    float latR = issLat * (float)M_PI / 180.0f;
+    float dLon = (issLon - sunLonDeg) * (float)M_PI / 180.0f;
+    float cosRho = sinf(latR)*sinf(sunDecl) + cosf(latR)*cosf(sunDecl)*cosf(dLon);
+    return cosRho > -0.9398f;
+}
+
 // ─── Map parameters ───────────────────────────────────────────────────────────
 // Default: MAP_TOP=75°N  MAP_BTM=-63°S  → MAP_RNG=138°
 static const int   MAP_Y0  = STATUS_H;
@@ -758,7 +788,44 @@ static void drawWorldMapImpl() {
 }
 
 void drawScreenGreyLine() {
-    drawWorldMap();
+    // When ISS is visible, zoom in to frame both ISS and QTH.
+    {
+        xSemaphoreTake(g_dataMutex, portMAX_DELAY);
+        int32_t now32  = (int32_t)time(nullptr);
+        bool   passNow = g_iss.passValid &&
+                         (now32 >= g_iss.passRiseSec && now32 < g_iss.passSetSec);
+        float  issLat  = g_iss.lat;
+        float  issLon  = g_iss.lon;
+        xSemaphoreGive(g_dataMutex);
+
+        if (passNow) {
+            float qLat = g_settings.lat;
+            float qLon = g_settings.lon;
+
+            // Centre between ISS and QTH; half-span ≥ 18° so there's context
+            float cLat = (issLat + qLat) * 0.5f;
+            float cLon = (issLon + qLon) * 0.5f;
+            float halfLat = max(fabsf(issLat - qLat) * 0.5f + 10.0f, 18.0f);
+            float halfLon = max(fabsf(issLon - qLon) * 0.5f + 10.0f, 18.0f);
+
+            // Maintain screen aspect ratio (MAP_W : MAP_H = 320 : 224)
+            float aspect = (float)MAP_W / (float)MAP_H;
+            if (halfLon / halfLat < aspect)
+                halfLon = halfLat * aspect;
+            else
+                halfLat = halfLon / aspect;
+
+            // Clamp to valid map extents
+            float lonMin = max(cLon - halfLon, -180.0f);
+            float lonMax = min(cLon + halfLon,  180.0f);
+            float latMin = max(cLat - halfLat,  -75.0f);
+            float latMax = min(cLat + halfLat,   75.0f);
+
+            drawWorldMapZoomed(lonMin, lonMax, latMin, latMax);
+        } else {
+            drawWorldMap();
+        }
+    }
 
     // ── ISS orbit track + marker ─────────────────────────────────────────────
     {
@@ -773,6 +840,18 @@ void drawScreenGreyLine() {
             float prevLon = iss.trackLon[0];
             int   prevX   = lonToX(iss.trackLon[0]);
             int   prevY   = latToY(iss.trackLat[0]);
+
+            // On the zoomed map most track points project to extreme pixel
+            // coordinates. A drawLine from a visible point to one at (−8000,4000)
+            // enters the viewport at the wrong angle, making the track appear
+            // to point in the wrong direction. Skip segments where both
+            // endpoints are outside the visible area (with a generous margin).
+            const int MARGIN = 60;
+            auto inView = [&](int x, int y) -> bool {
+                return x >= -MARGIN && x < MAP_W + MARGIN &&
+                       y >= MAP_Y0 - MARGIN && y < MAP_Y0 + MAP_H + MARGIN;
+            };
+
             for (int k = 1; k < iss.trackCount; k++) {
                 float curLon = iss.trackLon[k];
                 int   curX   = lonToX(curLon);
@@ -780,8 +859,10 @@ void drawScreenGreyLine() {
 
                 // Skip segment that would wrap across the anti-meridian
                 bool crossesAntimeridian = (fabsf(curLon - prevLon) > 150.0f);
+                // Skip segments completely outside the visible area
+                bool visible = inView(prevX, prevY) || inView(curX, curY);
                 // Draw only odd-numbered segments for dashed appearance
-                bool draw = (k % 2 == 1) && !crossesAntimeridian;
+                bool draw = (k % 2 == 1) && !crossesAntimeridian && visible;
                 if (draw)
                     spr.drawLine(prevX, prevY, curX, curY, trackCol);
 
@@ -792,8 +873,25 @@ void drawScreenGreyLine() {
         }
 
         if (iss.valid) {
-            uint32_t issCol  = spr.color888(0, 220, 255);   // cyan-white
-            uint32_t issGlow = spr.color888(0, 80, 100);    // dim halo
+            // While the ISS is above the horizon, colour matches the visibility indicator.
+            // When out of sight, use the default cyan.
+            uint32_t issCol;
+            if (iss.passNow) {
+                float sLonDeg, sDecl;
+                sunPosAt(time(nullptr), sLonDeg, sDecl);
+                bool  sunlit   = issIsSunlit(iss.lat, iss.lon, sLonDeg, sDecl);
+                float qthSunEl = sunElevAt(g_settings.lat, g_settings.lon, sLonDeg, sDecl);
+                issCol = !sunlit          ? spr.color888(110, 110, 120)  // in shadow — grey
+                       : qthSunEl < -6.0f ? spr.color888( 80, 220,  80) // dark sky  — green
+                       : qthSunEl <  0.0f ? spr.color888(180, 220,  80) // twilight  — yellow-green
+                       :                    spr.color888(220, 160,  60);// daylight  — amber
+            } else {
+                issCol = spr.color888(0, 220, 255);   // default cyan when not visible
+            }
+            uint32_t issGlow = spr.color888(
+                ((issCol >> 16) & 0xFF) / 4,
+                ((issCol >>  8) & 0xFF) / 4,
+                ( issCol        & 0xFF) / 4);   // dim tint of main colour for halo
 
             int ix = lonToX(iss.lon);
             int iy = latToY(iss.lat);
@@ -838,9 +936,59 @@ void drawScreenGreyLine() {
         ISSData iss2 = g_iss;
         xSemaphoreGive(g_dataMutex);
 
+        // Derive passNow from the clock so the box changes instantly when the
+        // countdown hits zero, without waiting for the next 30-s fetch cycle.
+        if (iss2.passValid) {
+            int32_t n = (int32_t)time(nullptr);
+            iss2.passNow = (n >= iss2.passRiseSec && n < iss2.passSetSec);
+        }
+
         auto azToComp = [](int az) -> const char* {
             const char* pts[] = {"N","NE","E","SE","S","SW","W","NW"};
             return pts[((az + 22) % 360) / 45];
+        };
+
+        // Propagate ISS position analytically from stored orbital epoch so that
+        // az/el/Doppler update every draw frame, not just every 30-s API poll.
+        struct ISSRealtime { float az, el, rangeRateKmps; };
+        auto issRealtime = [&]() -> ISSRealtime {
+            const float RE     = 6371.0f;
+            const float ALT    = 408.0f;
+            const float INC    = 51.6f  * (float)M_PI / 180.0f;
+            const float PERIOD = 5561.0f;
+            const float N_ORB  = 2.0f * (float)M_PI / PERIOD;
+            const float EARTH_W = 360.0f / 86400.0f;
+            const float D2R    = (float)M_PI / 180.0f;
+
+            float qLat = g_settings.lat * D2R;
+            float qLon = g_settings.lon * D2R;
+            float dt   = (float)((int32_t)time(nullptr) - iss2.orbitEpoch);
+
+            struct SlAzEl { float sl, az, el; };
+            auto slantAzEl = [&](float dtS) -> SlAzEl {
+                float u    = iss2.orbitU0 + N_ORB * dtS;
+                float sLat = asinf(constrain(sinf(INC) * sinf(u), -1.0f, 1.0f));
+                float dLam = atan2f(cosf(INC)*sinf(u), cosf(u)) - iss2.orbitLambda0;
+                float sLonD = iss2.orbitLon0 + dLam * 180.0f / (float)M_PI - EARTH_W * dtS;
+                while (sLonD >  180.0f) sLonD -= 360.0f;
+                while (sLonD < -180.0f) sLonD += 360.0f;
+                float sLonR = sLonD * D2R;
+                float cosRho = constrain(
+                    sinf(qLat)*sinf(sLat) + cosf(qLat)*cosf(sLat)*cosf(sLonR - qLon),
+                    -1.0f, 1.0f);
+                float sl = sqrtf(RE*RE + (RE+ALT)*(RE+ALT) - 2.0f*RE*(RE+ALT)*cosRho);
+                float el = asinf(((RE+ALT)*cosRho - RE) / sl) * 180.0f / (float)M_PI;
+                float dL = sLonR - qLon;
+                float az = atan2f(sinf(dL)*cosf(sLat),
+                                  cosf(qLat)*sinf(sLat) - sinf(qLat)*cosf(sLat)*cosf(dL))
+                           * 180.0f / (float)M_PI;
+                if (az < 0.0f) az += 360.0f;
+                return { sl, az, el };
+            };
+
+            SlAzEl s0 = slantAzEl(dt);
+            SlAzEl s1 = slantAzEl(dt + 1.0f);
+            return { s0.az, s0.el, s0.sl - s1.sl };   // rangeRate +ve = approaching
         };
 
         const int BX  = 2;
@@ -892,14 +1040,16 @@ void drawScreenGreyLine() {
 
             int durMin = (int)((iss2.passSetSec - iss2.passRiseSec) / 60);
 
-            char untilBuf[12] = "";
+            // "in %dh%02dm" — sized for the widest int printing.
+            char untilBuf[32] = "";
             if (!iss2.passNow) {
                 time_t nowT2 = time(nullptr);
                 int secs = (int)(iss2.passRiseSec - nowT2);
                 if (secs < 0) secs = 0;
                 int h = secs / 3600, m = (secs % 3600) / 60;
-                if (h > 0) snprintf(untilBuf, sizeof(untilBuf), "in %dh%02dm", h, m);
-                else        snprintf(untilBuf, sizeof(untilBuf), "in %dm", m);
+                if (h > 0)    snprintf(untilBuf, sizeof(untilBuf), "in %dh%02dm", h, m);
+                else if (m > 0) snprintf(untilBuf, sizeof(untilBuf), "in %dm", m);
+                else          snprintf(untilBuf, sizeof(untilBuf), "in %ds", secs);
             }
 
             char line1[32];
@@ -918,15 +1068,73 @@ void drawScreenGreyLine() {
             // Line 4: "Max elevation: NNN" + degree circle
             int w4 = spr.textWidth("Max elevation: ") + degW(iss2.passMaxEl);
 
+            // Visibility: compute illumination at pass midpoint (or now for live pass)
+            {   // scope for sun position variables
+            time_t midT    = iss2.passNow ? time(nullptr)
+                                          : (time_t)((iss2.passRiseSec + iss2.passSetSec) / 2);
+            float midIssLat = iss2.passNow ? iss2.lat : iss2.passMidLat;
+            float midIssLon = iss2.passNow ? iss2.lon : iss2.passMidLon;
+            float sLonDeg, sDecl;
+            sunPosAt(midT, sLonDeg, sDecl);
+            bool sunlit     = issIsSunlit(midIssLat, midIssLon, sLonDeg, sDecl);
+            float qthSunEl  = sunElevAt(g_settings.lat, g_settings.lon, sLonDeg, sDecl);
+
+            const char* visLabel;
+            uint32_t    visCol;
+            if (!sunlit) {
+                visLabel = "ISS in Earth's shadow";
+                visCol   = spr.color888(110, 110, 120);
+            } else if (qthSunEl < -6.0f) {
+                visLabel = "Sunlit, dark sky";
+                visCol   = spr.color888(80, 220, 80);
+            } else if (qthSunEl < 0.0f) {
+                visLabel = "Sunlit, twilight";
+                visCol   = spr.color888(180, 220, 80);
+            } else {
+                visLabel = "Sunlit, daylight";
+                visCol   = spr.color888(220, 160, 60);
+            }
+
+            // Countdown to end of pass (live pass only)
+            // "%dm %02ds remaining" — sized for the widest int printing.
+            char cntBuf[40] = "";
+            if (iss2.passNow) {
+                int secsLeft = max(0, (int)(iss2.passSetSec - time(nullptr)));
+                snprintf(cntBuf, sizeof(cntBuf), "%dm %02ds remaining",
+                         secsLeft / 60, secsLeft % 60);
+            }
+
+            // Compute real-time az/el/Doppler from orbital propagation (updates every draw frame)
+            ISSRealtime rt = {};
+            if (iss2.passNow) rt = issRealtime();
+
+            // Current Az/El label (live pass only)
+            char azElBuf[28] = "";
+            int  wAzEl = 0;
+            if (iss2.passNow) {
+                int iaz = (int)roundf(rt.az);
+                int iel = (int)roundf(rt.el);
+                snprintf(azElBuf, sizeof(azElBuf), "Az: %s ", azToComp(iaz));
+                int pfxW = spr.textWidth(azElBuf);
+                // full width: "Az: NNN NNN°  El: NN°"
+                char tmp[8]; snprintf(tmp, sizeof(tmp), "%d", iaz);
+                wAzEl = pfxW + (int)spr.textWidth(tmp) + 6   // deg circle + gap
+                      + (int)spr.textWidth("  El: ")
+                      + degW(iel);
+            }
+
             const char* title = iss2.passNow ? "ISS VISIBLE NOW" : "NEXT ISS PASS";
             int BW = PAD + 2;   // 2 extra so circle on last line doesn't touch border
-            BW = max(BW, PAD + (int)spr.textWidth(title)  + PAD);
-            BW = max(BW, PAD + (int)spr.textWidth(line1)  + PAD);
+            BW = max(BW, PAD + (int)spr.textWidth(title)    + PAD);
+            BW = max(BW, PAD + (int)spr.textWidth(line1)    + PAD);
             BW = max(BW, PAD + (int)spr.textWidth(untilBuf) + PAD);
+            BW = max(BW, PAD + (int)spr.textWidth(cntBuf)   + PAD);
+            BW = max(BW, PAD + wAzEl + PAD);
             BW = max(BW, PAD + w3 + PAD);
             BW = max(BW, PAD + w4 + PAD);
+            BW = max(BW, PAD + (int)spr.textWidth(visLabel) + PAD);
 
-            const int LINES = 5;
+            const int LINES = iss2.passNow ? 7 : 6;
             const int BH = PAD + LINES * LH + (LINES - 1) * 1 + PAD;
             const int BY = MAP_Y0 + MAP_H - BH - 1;
 
@@ -959,15 +1167,35 @@ void drawScreenGreyLine() {
             spr.setCursor(BX + PAD, ty);  spr.print(line1);
             ty += LH + 1;
 
-            // Line 2: time-until
-            if (!iss2.passNow && untilBuf[0]) {
+            // Line 2: countdown (live pass) or time-until (future pass)
+            if (iss2.passNow && cntBuf[0]) {
+                spr.setTextColor(spr.color888(0, 220, 100));
+                spr.setCursor(BX + PAD, ty);
+                spr.print(cntBuf);
+            } else if (!iss2.passNow && untilBuf[0]) {
                 spr.setTextColor(spr.color888(160, 180, 200));
                 spr.setCursor(BX + PAD, ty);
                 spr.print(untilBuf);
             }
             ty += LH + 1;
 
-            // Line 3: rise / set azimuths
+            // Line 3 (live pass): current azimuth and elevation
+            if (iss2.passNow) {
+                int iaz = (int)roundf(rt.az);
+                int iel = (int)roundf(rt.el);
+                uint32_t col3a = spr.color888(100, 220, 255);
+                spr.setTextColor(col3a);
+                spr.setCursor(BX + PAD, ty);
+                spr.print("Az: ");
+                spr.print(azToComp(iaz));
+                spr.print(" ");
+                printDeg(iaz, col3a);
+                spr.print("  El: ");
+                printDeg(iel, col3a);
+                ty += LH + 1;
+            }
+
+            // Line 3/4: rise / set azimuths
             {
                 uint32_t col3 = spr.color888(180, 180, 200);
                 spr.setTextColor(col3);
@@ -985,6 +1213,99 @@ void drawScreenGreyLine() {
                 spr.print("Max elevation: ");
                 printDeg(iss2.passMaxEl, col4);
             }
+            ty += LH + 1;
+
+            // Line 5: illumination / sky conditions
+            spr.setTextColor(visCol);
+            spr.setCursor(BX + PAD, ty);
+            spr.print(visLabel);
+
+            // ── Doppler frequency panel (right side, live pass only) ──────────
+            if (iss2.passNow) {
+                // Nominal frequencies in MHz
+                static const float FREQ_SSTV_DN = 437.550f;
+                static const float FREQ_APRS_DN = 145.825f;
+                static const float FREQ_RPT_DN  = 437.800f;
+                static const float FREQ_RPT_UP  = 145.990f;
+
+                // c = 299792.458 km/s; v_r positive = approaching
+                const float INV_C = 1.0f / 299792.458f;
+                float vr = rt.rangeRateKmps;
+
+                // Downlinks: receiver tunes up when approaching
+                // Uplinks:   transmitter sends down when approaching (to hit nominal on ISS)
+                float fSstvDn = FREQ_SSTV_DN * (1.0f + vr * INV_C);
+                float fAprsDn = FREQ_APRS_DN * (1.0f + vr * INV_C);
+                float fRptDn  = FREQ_RPT_DN  * (1.0f + vr * INV_C);
+                float fRptUp  = FREQ_RPT_UP  * (1.0f - vr * INV_C);
+
+                // Format: "145.825" — 3 decimal places (kHz resolution)
+                auto fmtMHz = [](float f, char* buf, int bufsz) {
+                    int whole = (int)f;
+                    int kHz   = (int)roundf((f - whole) * 1000.0f);
+                    if (kHz >= 1000) { whole++; kHz -= 1000; }
+                    snprintf(buf, bufsz, "%d.%03d", whole, kHz);
+                };
+
+                char sBuf[12], aBuf[12], rdBuf[12], ruBuf[12];
+                fmtMHz(fSstvDn, sBuf,  sizeof(sBuf));
+                fmtMHz(fAprsDn, aBuf,  sizeof(aBuf));
+                fmtMHz(fRptDn,  rdBuf, sizeof(rdBuf));
+                fmtMHz(fRptUp,  ruBuf, sizeof(ruBuf));
+
+                // Build row strings and measure box width
+                struct FRow { const char* label; const char* freq; uint32_t col; };
+                const FRow rows[] = {
+                    { "SSTV RX", sBuf,  spr.color888(140, 210, 255) },
+                    { "APRS RX", aBuf,  spr.color888(100, 255, 160) },
+                    { "RPT RX",  rdBuf, spr.color888(140, 210, 255) },
+                    { "RPT TX",  ruBuf, spr.color888(255, 200, 100) },
+                };
+                const int FROWS  = 4;
+                const char* FTITLE = "RADIO DOPPLER";
+
+                // Measure column widths
+                int lblW = spr.textWidth("SSTV RX");  // all labels same width
+                int freqW = 0;
+                for (int i = 0; i < FROWS; i++)
+                    freqW = max(freqW, (int)spr.textWidth(rows[i].freq));
+                const int FGAP = 6;
+                const char* MHZLBL = " MHz";
+                int mhzW = spr.textWidth(MHZLBL);
+
+                int FW = PAD + max((int)spr.textWidth(FTITLE),
+                                   lblW + FGAP + freqW + mhzW) + PAD;
+                int FH = PAD + LH + 1 + FROWS * (LH + 1) + PAD;
+                int FX = MAP_W - FW - 2;
+                int FY = MAP_Y0 + MAP_H - FH - 1;
+
+                spr.fillRect(FX, FY, FW, FH, spr.color888(8, 10, 22));
+                spr.drawRect(FX, FY, FW, FH, spr.color888(0, 200, 80));
+
+                // Title
+                spr.setTextColor(spr.color888(0, 220, 100));
+                spr.setCursor(FX + PAD, FY + PAD);
+                spr.print(FTITLE);
+
+                int fy = FY + PAD + LH + 1;
+                for (int i = 0; i < FROWS; i++) {
+                    // Label (dim)
+                    spr.setTextColor(spr.color888(140, 150, 160));
+                    spr.setCursor(FX + PAD, fy);
+                    spr.print(rows[i].label);
+                    // Frequency (coloured, right-aligned within freqW)
+                    int fw = spr.textWidth(rows[i].freq);
+                    spr.setTextColor(rows[i].col);
+                    spr.setCursor(FX + PAD + lblW + FGAP + (freqW - fw), fy);
+                    spr.print(rows[i].freq);
+                    // Unit
+                    spr.setTextColor(spr.color888(100, 110, 120));
+                    spr.print(MHZLBL);
+                    fy += LH + 1;
+                }
+            }
+
+            }   // end visibility scope
         }
     }
 }

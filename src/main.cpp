@@ -13,6 +13,7 @@
 #include "settings.h"
 #include "screen_settings.h"
 #include "screen_pskreporter.h"
+#include "screen_ft8spots.h"
 #include "screen_contests.h"
 #include "screen_hf_now.h"
 #include "fonts/ui_fonts.h"
@@ -28,6 +29,7 @@ TrackerData       g_tracker;
 ISSData           g_iss;
 DXSpotsData       g_dxSpots;
 PSKData           g_pskData;
+FT8SpotsData      g_ft8Spots;
 POTASpotsData     g_potaSpots;
 SOTASpotsData     g_sotaSpots;
 ContestData       g_contests;
@@ -38,6 +40,9 @@ volatile bool     g_tzLookupReq = false;
 volatile float    g_tzLookupLat = 0.0f;
 volatile float    g_tzLookupLon = 0.0f;
 SemaphoreHandle_t g_dataMutex;
+
+// ─── Fetch state (declared in data_store.h) ───────────────────────────────────
+volatile FetchState g_fetchState[FSRC_COUNT] = {};   // all IDLE at boot
 
 // ─── SSL pre-reserves (declared in fetch.h) ───────────────────────────────────
 // Two blocks are allocated in setup() immediately after the sprite, while the
@@ -62,7 +67,7 @@ void* g_sslCtxR    = nullptr;
 // consumed and no contiguous 8 KB block survives.  Static allocation side-steps
 // the problem entirely: WiFi sees the same heap it always had.
 static StaticTask_t s_fetchTaskBuffer;
-static StackType_t  s_fetchTaskStack[8192];   // StackType_t = uint8_t on ESP32
+static StackType_t  s_fetchTaskStack[12288];  // StackType_t = uint8_t on ESP32
 
 // ─── Navigation state ─────────────────────────────────────────────────────────
 static uint8_t       g_screen       = SCR_CLOCK;
@@ -180,6 +185,7 @@ static int nextEnabledScreen(int from, int dir) {
 static void goTo(int s, unsigned long pauseMs = 0) {
     if ((uint8_t)(s % NUM_SCREENS) != g_screen) {
         pskClearSelection();
+        ft8ClearSelection();
         contestClearSelection();
     }
     g_screen    = (uint8_t)(s % NUM_SCREENS);
@@ -319,6 +325,9 @@ static void handleTouch() {
             } else if (g_screen == SCR_PSKREPORTER &&
                        pskTouchUp(g_touchStartX, g_touchStartY)) {
                 g_pauseUntil = millis() + 10000UL;
+            } else if (g_screen == SCR_FT8SPOTS &&
+                       ft8TouchUp(g_touchStartX, g_touchStartY)) {
+                g_pauseUntil = millis() + 10000UL;
             } else if (g_screen == SCR_CONTESTS &&
                        contestTouchUp(g_touchStartX, g_touchStartY)) {
                 g_lastCycle = millis();
@@ -454,18 +463,85 @@ void setup() {
     Serial.println("[boot] Ready");
 }
 
+// ─── Screen name table ────────────────────────────────────────────────────────
+static const char* screenName(int id) {
+    switch (id) {
+        case SCR_CLOCK:       return "CLOCK";
+        case SCR_WEATHER:     return "WEATHER";
+        case SCR_HF_NOW:      return "HF_NOW";
+        case SCR_PROPAGATION: return "PROPAGATION";
+        case SCR_GREYLINE:    return "GREYLINE";
+        case SCR_PSKREPORTER: return "PSKREPORTER";
+        case SCR_FT8SPOTS:    return "FT8_SPOTS";
+        case SCR_DXSPOTS:     return "DX_SPOTS";
+        case SCR_POTASPOTS:   return "POTA_SPOTS";
+        case SCR_SOTASPOTS:   return "SOTA_SPOTS";
+        case SCR_CONTESTS:    return "CONTESTS";
+        case SCR_BBC:         return "BBC_NEWS";
+        case SCR_APPLE:       return "APPLE_NEWS";
+        case SCR_TRACKER:     return "TRACKER";
+        default:              return "?";
+    }
+}
+
+static const char* fsStr(FetchState s) {
+    switch (s) {
+        case FS_IDLE:   return "idle";
+        case FS_ACTIVE: return "ACTIVE";
+        case FS_OK:     return "ok";
+        case FS_FAIL:   return "FAIL";
+        default:        return "?";
+    }
+}
+
+// Periodic status dump — reads fetch states (volatile, no mutex needed) and
+// item counts (under mutex for consistency).
+static void printDataStatus() {
+    // Snapshot volatile fetch states first (single-byte reads are atomic)
+    FetchState fs[FSRC_COUNT];
+    for (int i = 0; i < FSRC_COUNT; i++) fs[i] = g_fetchState[i];
+
+    // Item counts need the mutex
+    xSemaphoreTake(g_dataMutex, portMAX_DELAY);
+    uint8_t bbcN  = g_bbcNews.count;
+    uint8_t appN  = g_appleNews.count;
+    uint8_t dxN   = g_dxSpots.count;
+    uint8_t potaN = g_potaSpots.count;
+    uint8_t sotaN = g_sotaSpots.count;
+    uint8_t cxN   = g_contests.count;
+    uint8_t pskN  = g_pskData.count;
+    uint8_t ft8N  = g_ft8Spots.count;
+    xSemaphoreGive(g_dataMutex);
+
+    Serial.printf("[screens] weather:%-6s  solar:%-6s  iss:%-6s  tracker:%s\n",
+        fsStr(fs[FSRC_WEATHER]), fsStr(fs[FSRC_SOLAR]),
+        fsStr(fs[FSRC_ISS]),     fsStr(fs[FSRC_TRACKER]));
+    Serial.printf("[screens] bbc:%-6s(%d)  apple:%-6s(%d)\n",
+        fsStr(fs[FSRC_BBC]), bbcN, fsStr(fs[FSRC_APPLE]), appN);
+    Serial.printf("[screens] dx:%-6s(%d)  pota:%-6s(%d)  sota:%-6s(%d)  contests:%-6s(%d)\n",
+        fsStr(fs[FSRC_DX]),       dxN,
+        fsStr(fs[FSRC_POTA]),     potaN,
+        fsStr(fs[FSRC_SOTA]),     sotaN,
+        fsStr(fs[FSRC_CONTESTS]), cxN);
+    Serial.printf("[screens] psk:%-6s(%d)  ft8:%-6s(%d)\n",
+        fsStr(fs[FSRC_PSK]), pskN, fsStr(fs[FSRC_FT8]), ft8N);
+}
+
 // ─── loop() ──────────────────────────────────────────────────────────────────
 void loop() {
     handleTouch();
 
     // ── ISS pass detection ────────────────────────────────────────────────────
-    // Check passNow flag (updated every ~30 s by fetchISS) and jump to/from
-    // the Grey Line screen when a pass starts or ends.
+    // Derive passNow from the clock rather than the stale flag so the jump
+    // fires the moment the countdown reaches zero, not up to 30 s later.
     if (!g_inSettings && g_settings.issJumpEnabled) {
         static bool s_prevPassNow = false;
         bool passNow = false;
         xSemaphoreTake(g_dataMutex, portMAX_DELAY);
-        passNow = g_iss.passValid && g_iss.passNow;
+        if (g_iss.passValid) {
+            int32_t now32 = (int32_t)time(nullptr);
+            passNow = (now32 >= g_iss.passRiseSec && now32 < g_iss.passSetSec);
+        }
         xSemaphoreGive(g_dataMutex);
 
         if (passNow && !s_prevPassNow) {
@@ -493,6 +569,28 @@ void loop() {
         if (g_autoPlay && !paused && (millis() - g_lastCycle >= cycleMs)) {
             g_screen    = (uint8_t)nextEnabledScreen(g_screen, +1);
             g_lastCycle = millis();
+        }
+    }
+
+    // ── Screen-change log ─────────────────────────────────────────────────────
+    {
+        static uint8_t s_lastScreen = 0xFF;
+        if (g_screen != s_lastScreen) {
+            Serial.printf("[ui] screen -> %s (#%d)\n", screenName(g_screen), g_screen);
+            s_lastScreen = g_screen;
+        }
+    }
+
+    // ── Periodic status dump every 30 s ──────────────────────────────────────
+    {
+        static unsigned long s_lastStatus = 0;
+        if (millis() - s_lastStatus >= 30000UL) {
+            s_lastStatus = millis();
+            uint32_t ms  = millis();
+            uint32_t s   = ms / 1000; ms %= 1000;
+            uint32_t m   = s  / 60;   s  %= 60;
+            Serial.printf("[%02u:%02u.%03u] [status] screen=%s\n", m, s, ms, screenName(g_screen));
+            printDataStatus();
         }
     }
 

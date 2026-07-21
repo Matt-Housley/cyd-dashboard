@@ -11,6 +11,7 @@ extern int getWiFiBars();
 #include "screen_propagation.h"
 #include "screen_greyline.h"
 #include "screen_pskreporter.h"
+#include "screen_ft8spots.h"
 #include "screen_bbc.h"
 #include "screen_apple.h"
 #include "screen_tracker.h"
@@ -117,7 +118,6 @@ void fmtPrice(char* buf, size_t bufLen, float price) {
     // Insert commas every 3 digits from the decimal point leftward
     char out[20] = {};
     int oi = 0;
-    int digits = dotPos;          // number of integer digits
     int commaEvery = 3;
     for (int i = 0; raw[i]; i++) {
         if (i < dotPos) {
@@ -162,8 +162,9 @@ static const char* SCREEN_LABELS[NUM_SCREENS] = {
     "Weather",
     "HF Conditions",
     "Propagation",
-    "Grey Line",
+    "ISS Tracker",
     "PSK Reporter",
+    "FT8 Spots",
     "DX Spots",
     "POTA Spots",
     "SOTA Spots",
@@ -323,7 +324,7 @@ static void drawStatusBar(int screenID, bool autoPlay, bool paused) {
     }
 
     // ── Left side: screen counter + label ────────────────────────────────────
-    char cntBuf[8];
+    char cntBuf[24];
     snprintf(cntBuf, sizeof(cntBuf), "%d/%d", screenID + 1, NUM_SCREENS);
     spr.setTextColor(C(COL_GREY));
     spr.setCursor(4, 3);
@@ -385,6 +386,7 @@ void uiDraw(int screenID, bool autoPlay, bool paused, bool inSettings) {
             case SCR_PROPAGATION: drawScreenPropagation(); break;
             case SCR_GREYLINE:      drawScreenGreyLine();      break;
             case SCR_PSKREPORTER:  drawScreenPSKReporter();  break;
+            case SCR_FT8SPOTS:     drawScreenFT8Spots();     break;
             case SCR_BBC:         drawScreenBBC();         break;
             case SCR_APPLE:       drawScreenApple();       break;
             case SCR_TRACKER:     drawScreenTracker();     break;

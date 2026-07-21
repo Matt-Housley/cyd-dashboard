@@ -3,9 +3,9 @@
 
 // ─── Version ─────────────────────────────────────────────────────────────────
 #define VERSION_MAJOR  1
-#define VERSION_MINOR  17
-#define VERSION_PATCH  15
-#define VERSION_STR    "1.17.015"
+#define VERSION_MINOR  18
+#define VERSION_PATCH  0
+#define VERSION_STR    "1.18.000"
 
 // ─── Display ──────────────────────────────────────────────────────────────────
 #define SCREEN_W  320
@@ -62,6 +62,7 @@
 #define REFRESH_SOTASPOTS_MS  60000UL   // 60 s
 #define REFRESH_CONTESTS_MS 3600000UL   // 60 min
 #define REFRESH_PSK_MS       120000UL   //  2 min
+#define REFRESH_FT8_MS       120000UL   //  2 min
 
 // ─── Network ──────────────────────────────────────────────────────────────────
 #define WIFI_AP_NAME  "CYD-Dashboard"
@@ -89,8 +90,10 @@
 // NOTE: http:// does NOT work — the server redirects to https:// and the plain
 //       HTTP path in httpGet() cannot follow an HTTP→HTTPS redirect.
 #define API_PSKREPORTER "https://retrieve.pskreporter.info/query?senderCallsign=%s&lastSeconds=900&rronly=1"
+// %s = 4-char Maidenhead grid (e.g. IO92). Returns what local stations are hearing.
+#define API_FT8SPOTS    "https://retrieve.pskreporter.info/query?receiverGrid=%s&lastSeconds=900&rronly=1"
 // ─── Screen IDs ───────────────────────────────────────────────────────────────
-#define NUM_SCREENS  13
+#define NUM_SCREENS  14
 
 enum ScreenID : uint8_t {
     SCR_CLOCK = 0,
@@ -99,6 +102,7 @@ enum ScreenID : uint8_t {
     SCR_PROPAGATION,
     SCR_GREYLINE,
     SCR_PSKREPORTER,
+    SCR_FT8SPOTS,
     SCR_DXSPOTS,
     SCR_POTASPOTS,
     SCR_SOTASPOTS,

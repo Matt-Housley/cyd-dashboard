@@ -1,6 +1,354 @@
 CYD Dashboard — Version History
 ================================
 
+1.18.000  2026-07-21
+  [Feature] FT8 Spots screen — map of DX stations heard by receivers in your
+            grid square, sourced from PSK Reporter by receiverGrid. Tap the
+            furthest (orange) or loudest (green) station for a details overlay;
+            tap any other spot to highlight its band in the legend. The band
+            legend now auto-positions to whichever corner covers the fewest
+            spots instead of sitting fixed over the map.
+  [Fix] ROOT CAUSE of the long-running "screens stuck on Fetching..." problem.
+        mbedTLS was built with symmetric 16384-byte TLS content buffers, so a
+        handshake needed in_buf(16717) + out_buf(16717) = 33434 B CONTIGUOUS.
+        The board has ~85 KB free but only 17-35 KB contiguous, so that block
+        frequently did not exist; when the allocation failed partway through
+        handshake setup the partial allocations leaked and the largest free
+        block collapsed to ~4 KB permanently, after which every HTTPS fetch
+        failed until reboot. Verified on hardware: lb8bit went 34804 -> 4084 at
+        the first failure and never recovered.
+        The previous CONFIG_MBEDTLS_HARDWARE_AES=n fix could never have worked:
+        board_build.sdkconfig_flags is not a recognised PlatformIO option under
+        framework=arduino, and mbedTLS ships PREBUILT there, so nothing in
+        platformio.ini could reconfigure it.
+  [Chg] Migrated to framework = arduino, espidf on platform espressif32@5.4.0 —
+        the newest release whose Arduino core and framework-espidf share an
+        ESP-IDF (4.4.x); every 6.x pairs an IDF-4.4 Arduino core with espidf
+        5.x, which cannot be combined. This makes sdkconfig.defaults effective.
+        CONFIG_MBEDTLS_ASYMMETRIC_CONTENT_LEN with OUT_CONTENT_LEN=4096 drops
+        the contiguous requirement from 33434 B to 16717 B. IN stays at 16384
+        because a client must still be able to receive a full-size record.
+        Result: all 14 sources OK, lb8bit steady at 43000-51000 over 7 minutes.
+        NOTE: build with ~/.platformio/penv/bin/pio (Python 3.11) — this
+        platform's espidf.py imports pkg_resources, absent in Python 3.12+.
+  [Chg] Every fetch now goes through one transport, httpStream(), replacing
+        httpGet() and five separate hand-rolled copies of the SSL
+        release/reclaim choreography (weather, RSS, tracker, POTA, tz lookup).
+        The copies had already drifted — fetchWeather() was missing the
+        SO_LINGER RST the others had.
+  [Chg] Responses are consumed as they arrive rather than buffered whole:
+        scanTags() for attribute-style XML (PSK, FT8), scanBlocks() for element
+        blocks (DX spots, RSS items, contests), filtered streaming
+        deserializeJson() for SOTA, and httpFetchText() into a bounded buffer
+        for small payloads (ISS, solar, contest detail). Memory use no longer
+        scales with response size.
+  [Fix] SOTA "IncompleteInput" was silent truncation, not an undersized buffer.
+        streamReadText() ignored String::concat()'s return value, so an
+        allocation failure still advanced the byte count and produced a short
+        body. Raising the buffer to 24576 in 1.17.038 could not have fixed it.
+  [Fix] FT8 Spots touch handlers were defined but never called from main.cpp,
+        so the screen had no touch input at all and its details overlay was
+        unreachable dead code.
+  [Fix] The pre-flight "heap fragmented, skipping TLS" check still required
+        33434 B after the buffer change and was rejecting connections that
+        would have succeeded (seen at lb8bit=27648). Now TLS_MIN_CONTIG,
+        documented as needing to track CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN.
+  [Fix] fetchISS() returned without setting FS_FAIL on a malformed response,
+        leaving the source stuck ACTIVE instead of retrying.
+  [Chg] Panel dimension defines renamed WIDTH/HEIGHT -> CYD_PANEL_W/CYD_PANEL_H.
+        Building mbedTLS from source exposed a collision with its own WIDTH
+        macro in ecp_curves.c.
+  [Fix] Widened ten snprintf destination buffers whose output could be silently
+        truncated (screen_bbc, screen_clock, screen_greyline, screen_settings,
+        ui). The IDF build surfaced these as -Werror=all failures; rather than
+        suppress the check, the buffers are now sized so truncation is
+        impossible and -Werror=all is left ON. The project builds warning-clean;
+        fix new warnings rather than re-adding build_unflags.
+  [Fix] PAGE_CALIBRATE was missing from the settings touch switch, so touches
+        during calibration fell through silently. That is correct behaviour —
+        LovyanGFX's calibrateTouch() consumes its own input — but it is now
+        explicit, so -Wswitch keeps checking that switch for real gaps.
+  [Chg] Removed two dead variables (screen_contests maxW, ui digits).
+  [Add] VS Code workspace (cyd-dashboard.code-workspace) plus Build / Upload /
+        Monitor / Regenerate-sdkconfig tasks, with Windows command variants.
+  [Doc] README rewritten around building: the pkg_resources prerequisite, the
+        platform-pin rationale, the sdkconfig regeneration trap, and a
+        troubleshooting section. FT8 Spots added to the screens table and
+        screenshot grid (screen count corrected 13 -> 14).
+  [Chg] sdkconfig.esp32dev is generated and now gitignored; sdkconfig.defaults
+        is the source of truth. NOTE: editing sdkconfig.defaults has NO effect
+        until the generated file is deleted.
+  BUILD REQUIREMENT: platform 5.4.0's espidf.py imports pkg_resources, which
+        current toolchains no longer provide (Python 3.12 dropped implicit
+        setuptools bundling; setuptools removed the module in v81). One-time
+        fix for whichever interpreter runs pio:
+            ~/.platformio/penv/bin/python -m pip install "setuptools<81"
+        A PlatformIO core update can replace that interpreter and silently undo
+        it. See README > Building.
+  Note: ESP-IDF 5.5.x / Arduino 3.x (via the pioarduino fork) was evaluated and
+        rejected for now. It builds with only two config lines and no source
+        changes, and fixes the pkg_resources problem outright — but IDF 5.5.4
+        costs ~25 KB of heap, and even with the TLS receive buffer reduced to
+        8192 or 12288, feeds.bbci.co.uk and api.pota.app fail with
+        MBEDTLS_ERR_CTR_DRBG_REQUEST_TOO_BIG (not buffer-size related — 8192 and
+        12288 behave identically) and the firmware hit a LoadProhibited panic.
+        Worth retrying when pioarduino ships a newer IDF.
+  Note: hardware AES is deliberately left ENABLED. The PADLOCK error was
+        assumed to be an AES alignment fault, but contestcalendar.com
+        negotiates ECDHE-ECDSA-AES256-GCM-SHA384 — identical to
+        feeds.bbci.co.uk, which succeeds every run — and PADLOCK appeared in a
+        run where the heap took no damage at all.
+
+1.17.040  2026-07-20
+  [Add] FetchState enum (IDLE/ACTIVE/OK/FAIL) with a volatile g_fetchState[]
+        array indexed by FetchSrc. Every fetch function sets ACTIVE at entry and
+        OK or FAIL at every exit path. The 30-second status dump now shows the
+        actual state of each data source, making it possible to distinguish
+        "never attempted" from "currently fetching" from "succeeded" from
+        "all retries failed".
+
+1.17.039  2026-07-20
+  [Add] Serial debug for remote monitoring: screen-change log fires whenever
+        the displayed screen changes ("screen -> SOTA_SPOTS (#9)"). Periodic
+        status dump fires every 30 s showing each screen's data state
+        (ok/fetch, count) so the state of all 14 screens is visible without
+        needing to see the display.
+
+1.17.038  2026-07-20
+  [Fix] Added SO_LINGER RST to fetchPOTASpots(), fetchRSSNews(), and
+        fetchTracker() — all three have custom SSL connection code that was
+        missing the RST protection applied to httpGet() in 1.17.037. The POTA
+        function is the confirmed crash cause: when POTA returns HTTP -1/-11 its
+        orphan TCP receive buffer arrives ~30 s later, fragmented the heap below
+        the 33434 B mbedTLS minimum, and triggered ctx=FAIL → reboot.
+  [Fix] Increased SOTA response buffer from 16384 to 24576 bytes. The
+        ArduinoJson IncompleteInput error was caused by the 15-spot JSON
+        response exceeding 16 KB. Larger buffer allows full parse.
+
+1.17.037  2026-07-20
+  [Fix] Applied SO_LINGER RST to all HTTPS connections in httpGet(). After
+        http.GET() returns, lwip_setsockopt(SO_LINGER, l_onoff=1, l_linger=0)
+        is set on the underlying socket fd so that close() sends TCP RST instead
+        of FIN. RST causes the server to stop transmitting immediately and lwIP
+        to discard any in-flight data rather than parking it in a permanent 16 KB
+        receive buffer. This eliminates the root cause of all orphan-buffer /
+        ctx=FAIL crashes, regardless of which server misbehaves.
+  [Fix] Increased TLS handshake timeout from 10 s to 30 s. The original 10 s
+        was chosen to avoid BBC's 120 s hang (now handled by sc.setTimeout).
+        SOTA's api2.sota.org.uk likely uses RSA key exchange, which requires
+        1–3 s of CPU on the ESP32 per modular exponentiation — a legitimate
+        handshake can exceed 10 s. With RST protection, a timeout no longer
+        causes a crash, just a longer wait.
+  [Fix] Re-enabled SOTA Spots (boot + task loop). Previously disabled because
+        handshake timeouts caused orphan TCP buffers; RST now prevents those.
+  [Chg] Removed the post-error drain loop — RST makes it redundant since lwIP
+        discards in-flight data on RST close rather than buffering it.
+
+1.17.036  2026-07-20
+  [Fix] Added CONFIG_MBEDTLS_HARDWARE_AES=n to platformio.ini via
+        board_build.sdkconfig_flags. The ESP32 hardware AES engine requires
+        DMA-aligned buffers; mbedTLS does not guarantee alignment, triggering
+        MBEDTLS_ERR_PADLOCK_DATA_MISALIGNED on certain servers (notably
+        contestcalendar.com). Software AES is slower but correct and avoids
+        the orphan-buffer / ctx=FAIL crash. Contest Calendar re-enabled in
+        both boot sequence and task loop.
+  Note: SOTA Spots remains disabled — its crash is a TLS handshake timeout
+        (>10 s), unrelated to the PADLOCK/AES issue.
+
+1.17.035  2026-07-20
+  [Fix] SOTA Spots and Contest Calendar screens now show "Unavailable" rather
+        than spinning on "Fetching..." forever. Both data sources remain
+        disabled: plain HTTP redirects to HTTPS on both servers (confirmed
+        via curl), and HTTPS triggers ESP32-fatal TLS issues (handshake
+        timeout on SOTA; hardware AES PADLOCK on ContestCalendar). At boot
+        both data structs are marked valid=true/count=0 so the draw functions
+        immediately show the unavailable message instead of the loader spinner.
+
+1.17.034  2026-07-20
+  [Fix] SOTA Spots and Contest Calendar screens no longer show "Fetching..."
+        indefinitely. Their data sources are disabled (orphan-buffer crash
+        risk); at boot they are now marked valid=true/count=0 so the draw
+        functions show "Unavailable" instead of spinning forever. Split the
+        draw condition (!valid → spinner, count==0 → unavailable message) in
+        screen_sota.cpp and screen_contests.cpp.
+  [Fix] Added 1-second drain on the SSL socket (sc) after HTTP error paths
+        in httpGet(). A failed connection (timeout, connection-refused) left
+        the TCP socket half-open; the server continued transmitting and lwIP
+        buffered a 16 KB orphan receive block ~30 s later. Draining the sc
+        directly after http.end() gives the server a chance to finish and
+        send FIN before our close, matching the drain already applied to the
+        success path.
+
+1.17.033  2026-07-20
+  [Fix] Added response drain in streamReadText() and streamReadBytes() after
+        the read loop. When the client stops reading mid-stream (maxBytes
+        reached), the server continues transmitting its remaining response data
+        into the TCP pipeline. lwIP allocates a 16 KB receive buffer ~30 s
+        after close to hold that data, permanently fragmenting the heap. By
+        draining up to 65536 B (max 2 s) before http.end(), the server can
+        finish sending and deliver its FIN before we close, preventing the
+        orphan buffer allocation. Root cause of the POTA → ctx=FAIL crash.
+
+1.17.032  2026-07-20
+  [Fix] Removed PSK Reporter and FT8 Spots from the boot fetch sequence.
+        Each successful pskreporter.info connection leaves a 16 KB orphan TCP
+        receive buffer ~30 s after close (the server continues transmitting
+        after the client disconnects). Running both at boot fragmented lb8bit
+        from 34804 to 18420 — below the 33434 B mbedTLS minimum — causing all
+        subsequent task-loop HTTPS fetches to fail. PSK and FT8 now run only
+        in the task loop, where their fragmentation effect is localised.
+  [Fix] Added pre-flight lb8bit check in httpGet(): if the largest free DMA
+        block after sslDataRelease() is < 33434 B, the TLS attempt is skipped
+        immediately with a log warning rather than failing mid-handshake and
+        wasting time on retries that cannot succeed.
+
+1.17.031  2026-07-20
+  [Fix] Disabled fetchSOTASpots() (boot + task loop). api2.sota.org.uk TLS
+        handshake consistently exceeds the 10 s timeout on ESP32, leaving an
+        abandoned TCP connection. The server continues transmitting; lwIP
+        allocates a 16 KB orphan receive buffer ~30 s later, fragmenting the
+        heap and triggering ctx=FAIL — the same mechanism as ContestCalendar.
+
+1.17.030  2026-07-20
+  [Fix] Disabled fetchContests() entirely (both boot sequence and task loop).
+        www.contestcalendar.com triggers the ESP32 hardware AES PADLOCK bug
+        (MBEDTLS_ERR_PADLOCK_DATA_MISALIGNED). After PADLOCK the server
+        continues transmitting; lwIP allocates a 16 KB orphan TCP receive
+        buffer ~30 s after connection close. This drops lb8bit from ~34 KB to
+        ~18 KB, which after sslX509Reclaim (−12288 B) leaves only 6132 B —
+        4 B short of the 6136 B needed for sslCtxReclaim — causing ctx=FAIL
+        and an infinite reboot loop. No application-level workaround is viable
+        without switching to software AES or a different contest data source.
+
+1.17.029  2026-07-20
+  [Fix] Added PADLOCK to the no-retry SSL error list. The ESP32 hardware AES
+        error (MBEDTLS_ERR_PADLOCK_DATA_MISALIGNED) occurs during data
+        transfer, not the handshake; retrying does not help and repeated
+        attempts accumulate lwIP TCP buffer leaks that degrade large-block DMA
+        memory. On PADLOCK, bail immediately and wait 10 s for lwIP to release
+        the stale TCP receive buffers before the next HTTPS connection.
+
+1.17.028  2026-07-20
+  [Fix] Added sc.setTimeout(15000) to cap socket reads at 15 s on all HTTPS
+        connections. setHandshakeTimeout(10) only covers the TLS negotiation
+        phase; if the server completes the handshake then goes silent (as seen
+        with BBC News), lwIP's default 120 s socket timeout would apply. This
+        prevents the 2-minute BBC stall that drained large-block DMA memory
+        and caused all subsequent HTTPS fetches to fail.
+
+1.17.027  2026-07-20
+  [Fix] Auto-reboot when the SSL context slot becomes permanently unrecoverable
+        (ctx=FAIL after sslAllReclaim). Once this occurs every HTTPS connection
+        fails forever; a clean reboot is the only way to restore the heap.
+  [Fix] Don't retry HTTPS on BIGNUM/allocation SSL errors. SOTA and Contest
+        Calendar use EC key exchange which requires large transient BIGNUM
+        allocations; retrying 3× on these errors drains large-block DMA memory
+        irreversibly. Fail-fast and move on instead.
+  [Fix] PSK Reporter and FT8 Spots now fetch before SOTA and Contest Calendar
+        in the boot sequence, so they run while heap is still healthy rather
+        than after BIGNUM errors have degraded the SSL memory budget.
+
+1.17.026  2026-07-20
+  [Fix] Set TLS handshake timeout to 10 s (was 120 s default) on all HTTPS
+        connections. A single stalled handshake was blocking the entire fetch
+        sequence for 2 minutes and leaving a permanent ~2.5 KB hole in the
+        large-block DMA heap, causing cascading SSL failures for all subsequent
+        fetches in the boot sequence.
+
+1.17.025  2026-07-20
+  [Fix]  Reverted static PSKData/FT8SpotsData locals (caused SSL heap drain by
+         increasing BSS at the expense of heap); the 12 KB fetch task stack
+         (v1.17.024) alone is sufficient to prevent the stack-overflow crash.
+  [Fix]  Added 500 ms cooldown after each pskreporter HTTPS fetch so mbedTLS
+         can fully release the DMA SSL record buffer before the next connection.
+  [Debug] All [tag] log lines in fetch.cpp now carry a [MM:SS.mmm] timestamp
+          so fetch durations and SSL timing are visible in serial output.
+
+1.17.024  2026-07-20
+  [Feature] New "FT8 Spots" screen showing DX contacts heard by local amateur
+            radio stations near the QTH. Data sourced from PSK Reporter via the
+            receiverGrid query (shows what stations in your grid square are
+            hearing). Spots are colour-coded by band, with pulsing rings on the
+            furthest DX station (orange) and the loudest signal (green). Touch
+            a spot for callsign, country, grid, band, SNR, distance, and the
+            receiving station's callsign. Screen refreshes every 2 minutes.
+
+1.17.023  2026-07-19
+  [Feature] Grey Line map automatically zooms in while the ISS is visible.
+            The view is centred between the ISS and the QTH with at least
+            18° of context on each side, scaled to maintain the correct
+            screen aspect ratio. The map returns to the full world view
+            as soon as the pass ends.
+
+1.17.022  2026-07-19
+  [Fix] Doppler frequencies, bearing, and elevation now update every screen
+        redraw (~1 s) rather than only when the ISS fetch fires (every 30 s).
+        The orbital state (mean anomaly, epoch, longitude) is saved at each
+        API poll; the draw function propagates the ISS position analytically
+        forward in time from that epoch so all real-time values stay smooth
+        between API calls.
+
+1.17.021  2026-07-19
+  [Feature] Real-time Doppler-corrected radio frequencies during a live ISS
+            pass. A "RADIO DOPPLER" panel appears in the bottom-right corner
+            whenever the ISS is above the horizon, showing four frequencies
+            updated every screen redraw (~1 s):
+            - SSTV RX   437.550 MHz (receive; shifts +/- ~10 kHz)
+            - APRS RX   145.825 MHz (receive; shifts +/- ~3.5 kHz)
+            - RPT RX    437.800 MHz (receive downlink from repeater)
+            - RPT TX    145.990 MHz (transmit to ISS; pre-compensated so the
+                                     ISS repeater receives the nominal uplink
+                                     frequency)
+            The range rate is computed from the same analytical orbital model
+            used for pass prediction, using a 1-second numerical derivative
+            of the slant range. Frequencies are displayed to 3 decimal places
+            (kHz resolution). Colours distinguish downlink (blue) from uplink
+            (amber).
+
+1.17.020  2026-07-19
+  [Feature] While the ISS is above the horizon, the Grey Line pass box now
+            shows the current bearing (azimuth) and elevation as seen from
+            the QTH, updated every screen redraw (~1 s). The line reads
+            "Az: NNW 312°  El: 23°" using the live ISS position. This
+            makes it easy to point a directional antenna or binoculars
+            without doing mental arithmetic. The box grows by one line
+            during a live pass to accommodate this information.
+
+1.17.019  2026-07-18
+  [Fix] ISS symbol on the Grey Line map only changes to the visibility
+        colour (green / yellow-green / amber / grey) while the ISS is
+        actually above the horizon. It returns to the default cyan when
+        the ISS is out of sight.
+
+1.17.018  2026-07-18
+  [Feature] While the ISS is above the horizon, the pass box on the Grey
+            Line screen shows a live countdown to loss of signal, e.g.
+            "3m 47s remaining", in green on the line below the pass times.
+            The countdown updates every screen redraw (~1 s).
+
+1.17.017  2026-07-18
+  [Feature] ISS symbol on the Grey Line map now uses the same colour
+            coding as the visibility line in the pass box: green (sunlit,
+            dark sky), yellow-green (sunlit, twilight), amber (sunlit,
+            daylight), or grey (ISS in Earth's shadow). The halo glow
+            is a dim tint of the same colour.
+
+1.17.016  2026-07-18
+  [Feature] ISS pass box on the Grey Line screen now shows a visual
+            observability line based on the Sun/ISS/Earth geometry at the
+            time of the pass:
+            - "ISS in Earth's shadow" (grey) — ISS is on the night side,
+              backlit is irrelevant; not optically visible
+            - "Sunlit, dark sky" (green) — ISS is illuminated and the
+              observer is in darkness; best conditions for visual tracking
+            - "Sunlit, twilight" (yellow-green) — ISS lit but sky is
+              transitioning; reasonable conditions
+            - "Sunlit, daylight" (amber) — ISS lit but sky too bright for
+              easy visual confirmation of pointing
+            The check uses the ISS orbital position at the pass midpoint
+            (recomputed from the same analytical model used for pass
+            prediction) and standard solar illumination geometry.
+
 1.17.015  2026-07-18
   [Fix] Distance Units and Temperature toggles could not be switched back
         once changed. The tap boundary was incorrectly set to the screen

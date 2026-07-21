@@ -1,0 +1,63 @@
+# ESP-IDF configuration for CYD Dashboard
+#
+# This file exists because mbedTLS ships PREBUILT in the plain `framework =
+# arduino` build — nothing in platformio.ini can reconfigure it.  (The old
+# `board_build.sdkconfig_flags` block was silently ignored for exactly this
+# reason.)  Building Arduino as an ESP-IDF component lets these take effect.
+#
+# ── Arduino-as-component ──────────────────────────────────────────────────────
+CONFIG_AUTOSTART_ARDUINO=y
+CONFIG_ARDUINO_LOOP_STACK_SIZE=12288
+CONFIG_FREERTOS_HZ=1000
+
+# ── Flash / partitions (mirrors the previous board_build.partitions) ──────────
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# ── Logging (was -DCORE_DEBUG_LEVEL=0) ────────────────────────────────────────
+CONFIG_LOG_DEFAULT_LEVEL_NONE=y
+CONFIG_ARDUHAL_LOG_DEFAULT_LEVEL_NONE=y
+
+# ── mbedTLS: PSK ciphersuites (required to compile, not to connect) ───────────
+# The ENTIRE body of Arduino's ssl_client.cpp is wrapped in
+#   #if !defined(MBEDTLS_KEY_EXCHANGE_SOME_PSK_ENABLED)
+#   #  warning "...enable PSK based cyphersuite modes..."
+#   #else  <whole file>  #endif
+# so without this the file compiles to an empty object and every
+# start_ssl_client / ssl_init symbol fails to link.  The stock Arduino sdkconfig
+# enables all four PSK key exchanges; only the minimum is enabled here, since
+# none of the dashboard's endpoints use PSK (all ECDHE-ECDSA or ECDHE-RSA) and
+# this build is trying to REDUCE footprint.
+CONFIG_MBEDTLS_PSK_MODES=y
+CONFIG_MBEDTLS_KEY_EXCHANGE_PSK=y
+
+# ── mbedTLS: the whole point of this migration ────────────────────────────────
+# The board has ~72–89 KB free but only 17–35 KB CONTIGUOUS.  The stock Arduino
+# build uses symmetric 16384-byte TLS content buffers, so mbedTLS needs
+# in_buf(16717) + out_buf(16717) = 33434 B contiguous — a block that only exists
+# for a moment after sslDataRelease(), and not at all once the heap ages.  When
+# that allocation fails partway through handshake setup, the partial
+# allocations leak and the largest block collapses to ~4 KB permanently.
+#
+# ASYMMETRIC_CONTENT_LEN lets the send buffer shrink independently.  A client
+# only ever SENDS small records (request headers); it must still be able to
+# RECEIVE a full-size 16384 record, so IN stays at the spec maximum.
+#
+#   before:  16717 + 16717 = 33434 B contiguous
+#   after:   16717 +  4373 = one 16717 block + one 4373 block
+#
+# 16717 fits inside the observed 17396 steady-state block, and the small out_buf
+# lands anywhere.  Deliberately conservative: dropping IN to 8192 would save
+# another ~8.5 KB but breaks against any server that sends full-size records.
+CONFIG_MBEDTLS_ASYMMETRIC_CONTENT_LEN=y
+CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=16384
+CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=4096
+
+# NOTE: hardware AES is deliberately left ENABLED.  The PADLOCK error was
+# assumed to be an AES alignment fault, but contestcalendar.com negotiates
+# ECDHE-ECDSA-AES256-GCM-SHA384 — byte-identical to feeds.bbci.co.uk, which
+# succeeds on every run — and PADLOCK appeared in a run where the heap took no
+# damage at all.  Software AES would only slow handshakes that already take
+# 5–25 s.  Revisit only if evidence points back at it.

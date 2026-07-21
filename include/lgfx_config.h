@@ -67,10 +67,10 @@ public:
             cfg.pin_cs           = 15;
             cfg.pin_rst          = -1;
             cfg.pin_busy         = -1;
-            cfg.memory_width     = WIDTH;
-            cfg.memory_height    = HEIGHT;
-            cfg.panel_width      = WIDTH;
-            cfg.panel_height     = HEIGHT;
+            cfg.memory_width     = CYD_PANEL_W;
+            cfg.memory_height    = CYD_PANEL_H;
+            cfg.panel_width      = CYD_PANEL_W;
+            cfg.panel_height     = CYD_PANEL_H;
             cfg.offset_x         = 0;
             cfg.offset_y         = 0;
             cfg.offset_rotation  = 0;

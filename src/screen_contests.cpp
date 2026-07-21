@@ -39,8 +39,12 @@ void drawScreenContests() {
     ContestData cd = g_contests;
     xSemaphoreGive(g_dataMutex);
 
-    if (!cd.valid || cd.count == 0) {
+    if (!cd.valid) {
         drawLoader("Fetching Contest Calendar...");
+        return;
+    }
+    if (cd.count == 0) {
+        drawLoader("No Contests Found");
         return;
     }
 
@@ -138,7 +142,6 @@ void drawScreenContests() {
             }
         } else {
             const int lineH = 13;
-            const int maxW  = PW - 14;
             const int leftX = PX + 6;
             const int rightLim = PX + PW - 6;
             spr.setFont(UI_FONT_9);

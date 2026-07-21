@@ -249,7 +249,8 @@ void drawScreenClock() {
         int riseLoc = ((riseMinUTC + utcOffMin) % (24 * 60) + 24 * 60) % (24 * 60);
         int setLoc  = ((setMinUTC  + utcOffMin) % (24 * 60) + 24 * 60) % (24 * 60);
 
-        char riseBuf[12], setBuf[12];
+        // "HH:MM " (6) + zone[8] = 14; 16 leaves the zone room it needs.
+        char riseBuf[16], setBuf[16];
         snprintf(riseBuf, sizeof(riseBuf), "%02d:%02d %s", riseLoc / 60, riseLoc % 60, zone);
         snprintf(setBuf,  sizeof(setBuf),  "%02d:%02d %s", setLoc  / 60, setLoc  % 60, zone);
 
@@ -290,11 +291,13 @@ void drawScreenClock() {
     int  absOff  = abs(utcOffMin);
     int  offH    = absOff / 60;
     int  offM    = absOff % 60;
-    char offBuf[10];
+    // "UTC" + sign + two ints + ":" — sized for the widest int printing.
+    char offBuf[32];
     if (offM == 0) snprintf(offBuf, sizeof(offBuf), "UTC%s%d",     negOff ? "-" : "+", offH);
     else           snprintf(offBuf, sizeof(offBuf), "UTC%s%d:%02d", negOff ? "-" : "+", offH, offM);
 
-    char note[48];
+    // tzName[32] + "  -  " + offBuf[32] — sized so neither can be cut short.
+    char note[80];
     snprintf(note, sizeof(note), "%s  -  %s", g_settings.tzName, offBuf);
     spr.setFont(UI_FONT_9);
     spr.setTextColor(C(COL_GREY));

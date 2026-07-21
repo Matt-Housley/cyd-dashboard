@@ -60,8 +60,12 @@ void drawScreenSOTA() {
     // 5 rows fill the entire content area (224 px → 44 px each, 4 px spare)
     const int ROW_H = CONTENT_H / SOTA_SPOTS_MAX;   // 44 px
 
-    if (!ds.valid || ds.count == 0) {
+    if (!ds.valid) {
         drawLoader("Fetching SOTA Spots...");
+        return;
+    }
+    if (ds.count == 0) {
+        drawLoader("No SOTA Spots");
         return;
     }
 

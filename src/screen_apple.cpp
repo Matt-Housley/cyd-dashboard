@@ -5,6 +5,12 @@
 #include "fetch.h"
 #include "fonts/ui_fonts.h"
 
+static LGFX_Sprite s_thumbSpr;
+static uint32_t    s_thumbVersion = 0xFFFFFFFF;
+static bool        s_thumbReady   = false;
+static int         s_thumbW       = 0;
+static int         s_thumbH       = 0;
+
 void drawScreenApple() {
     xSemaphoreTake(g_dataMutex, portMAX_DELAY);
     NewsData nd = g_appleNews;
@@ -33,21 +39,48 @@ void drawScreenApple() {
     int textX    = 8;
     int textMaxW = SCREEN_W - 20;
 
-    // Thumbnail — hold the mutex during decode so fetchThumb cannot overwrite
-    // the buffer on the other core while drawJpg/drawPng is reading it.
-    xSemaphoreTake(g_dataMutex, portMAX_DELAY);
-    if (g_appleThumbLen > 0) {
-        int ty = y + (topH - thumbH) / 2;
-        bool isPng = (g_appleThumbLen >= 4 &&
-                      g_appleThumbBuf[0] == 0x89 && g_appleThumbBuf[1] == 'P');
-        if (isPng)
-            spr.drawPng(g_appleThumbBuf, (uint32_t)g_appleThumbLen, 4, ty, thumbW, thumbH);
-        else
-            spr.drawJpg(g_appleThumbBuf, (uint32_t)g_appleThumbLen, 4, ty, thumbW, thumbH);
-        textX    = 4 + thumbW + 4;
+    {
+        xSemaphoreTake(g_dataMutex, portMAX_DELAY);
+        uint32_t ver = g_appleThumbVersion;
+        bool     hasData = (g_appleThumbLen > 0);
+        xSemaphoreGive(g_dataMutex);
+
+        if (hasData && ver != s_thumbVersion) {
+            s_thumbReady = false;
+            s_thumbSpr.deleteSprite();
+            s_thumbSpr.setColorDepth(16);
+            if (s_thumbSpr.createSprite(thumbW, thumbH)) {
+                s_thumbSpr.fillSprite(0);
+                xSemaphoreTake(g_dataMutex, portMAX_DELAY);
+                bool isPng = (g_appleThumbLen >= 4 &&
+                              g_appleThumbBuf[0] == 0x89 && g_appleThumbBuf[1] == 'P');
+                bool ok;
+                if (isPng)
+                    ok = s_thumbSpr.drawPng(g_appleThumbBuf, (uint32_t)g_appleThumbLen,
+                                            0, 0, thumbW, thumbH);
+                else
+                    ok = s_thumbSpr.drawJpg(g_appleThumbBuf, (uint32_t)g_appleThumbLen,
+                                            0, 0, thumbW, thumbH);
+                xSemaphoreGive(g_dataMutex);
+
+                if (ok) {
+                    s_thumbVersion = ver;
+                    s_thumbW = thumbW;
+                    s_thumbH = thumbH;
+                    s_thumbReady = true;
+                } else {
+                    s_thumbSpr.deleteSprite();
+                }
+            }
+        }
+    }
+
+    if (s_thumbReady) {
+        int ty = y + (topH - s_thumbH) / 2;
+        s_thumbSpr.pushSprite(&spr, 4, ty);
+        textX    = 4 + s_thumbW + 4;
         textMaxW = SCREEN_W - textX - 6;
     }
-    xSemaphoreGive(g_dataMutex);
 
     spr.setFont(UI_FONT_12);
     spr.setTextColor(C(COL_WHITE));
@@ -55,7 +88,6 @@ void drawScreenApple() {
     y += topH + 3;
 
     // ── Stories 2–4 ───────────────────────────────────────────────────────────
-    // rowH=40 fits two lines of DejaVu12 (5px top pad + 16 + 16 = 37, 3px margin).
     for (int i = 1; i < nd.count && i < 4; i++) {
         const int rowH = 40;
         drawPanel(2, y, SCREEN_W - 4, rowH, COL_PANEL, COL_BORDER);

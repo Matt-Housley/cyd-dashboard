@@ -15,6 +15,7 @@ void fetchContests();
 void fetchContestDetail();
 void fetchTzLookup();
 void fetchPSKReporter();
+void fetchFT8Spots();
 
 // FreeRTOS task — pin to core 0
 void fetchTask(void* param);
