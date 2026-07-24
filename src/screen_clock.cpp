@@ -8,9 +8,16 @@
 #include "moon_texture.h"   // 41×41 RGB565 moon photo from PROGMEM
 
 // ─── Moon graphic ─────────────────────────────────────────────────────────────
-// Samples the moon photo texture for lit pixels; dark blue-grey for the
-// unlit (shadow) side.  MOON_TEX is 41×41 = (2R+1)×(2R+1) pixels.
-// phase 0=new, 0.25=first quarter, 0.5=full, 0.75=last quarter.
+/**
+ * @brief Draw a photo-textured moon disc with the correct illuminated fraction.
+ *
+ * Samples the PROGMEM moon photo (MOON_TEX, 41×41 = (2R+1)²) for lit pixels and
+ * uses a dark blue-grey for the unlit (shadow) side, giving a realistic terminator.
+ * @param cx,cy  Disc centre in screen pixels.
+ * @param R      Disc radius in pixels (must match the texture: R=20 for 41×41).
+ * @param phase  Lunar phase in [0,1): 0=new, 0.25=first quarter, 0.5=full,
+ *               0.75=last quarter.
+ */
 static void drawMoon(int cx, int cy, int R, float phase) {
     const float PI2 = 2.0f * (float)M_PI;
     const float sp  = sinf(PI2 * phase);
@@ -48,7 +55,13 @@ static void drawMoon(int cx, int cy, int R, float phase) {
 }
 
 // ─── Moon phase ───────────────────────────────────────────────────────────────
-// Returns phase ∈ [0, 1).  0 = new, 0.5 = full.
+/**
+ * @brief Compute the current lunar phase from the system clock.
+ *
+ * Uses the synodic month (29.53059 days) referenced to the new moon of
+ * 6 Jan 2000. Requires the RTC to be NTP-synced for an accurate result.
+ * @return Phase in [0,1): 0 = new moon, 0.5 = full moon.
+ */
 static float moonPhase() {
     time_t now = time(nullptr);
     // Julian Day Number from Unix timestamp
@@ -59,6 +72,11 @@ static float moonPhase() {
     return (float)phase;
 }
 
+/**
+ * @brief Map a phase value to its human-readable name.
+ * @param p  Lunar phase in [0,1) as returned by moonPhase().
+ * @return A static string such as "Full Moon" or "Waxing Crescent" (never null).
+ */
 static const char* moonPhaseName(float p) {
     if (p < 0.025f || p >= 0.975f) return "New Moon";
     if (p < 0.235f)                 return "Waxing Crescent";
@@ -71,8 +89,16 @@ static const char* moonPhaseName(float p) {
 }
 
 // ─── Sunrise / Sunset (USNO algorithm) ───────────────────────────────────────
-// Returns true when both events exist (false near poles).
-// riseMinUTC / setMinUTC are minutes after midnight UTC.
+/**
+ * @brief Compute sunrise and sunset times for a location and date (USNO algorithm).
+ * @param tm               Date to compute for; only tm_yday is used.
+ * @param lat              Observer latitude in degrees (north positive).
+ * @param lon              Observer longitude in degrees (east positive).
+ * @param[out] riseMinUTC  Receives sunrise as minutes after midnight UTC.
+ * @param[out] setMinUTC   Receives sunset as minutes after midnight UTC.
+ * @return true if both events exist; false near the poles during polar
+ *         day/night (in which case the out-params are left unset).
+ */
 static bool calcSun(const struct tm& tm, float lat, float lon,
                     int& riseMinUTC, int& setMinUTC) {
     const float DEG = (float)M_PI / 180.0f;
@@ -123,6 +149,9 @@ static bool calcSun(const struct tm& tm, float lat, float lon,
 }
 
 // ─── Main draw function ───────────────────────────────────────────────────────
+/** @brief Draw the Clock screen: big local time, date, moon phase graphic, and
+ *         UTC / sunrise / sunset for the configured location. Shows an
+ *         NTP-waiting loader until the RTC is synced. See screen_clock.h. */
 void drawScreenClock() {
     struct tm ti;
     if (!getLocalTime(&ti)) {

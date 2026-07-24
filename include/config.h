@@ -4,8 +4,29 @@
 // ─── Version ─────────────────────────────────────────────────────────────────
 #define VERSION_MAJOR  1
 #define VERSION_MINOR  18
-#define VERSION_PATCH  0
-#define VERSION_STR    "1.18.000"
+#define VERSION_PATCH  31
+#define VERSION_STR    "1.18.031"
+
+// ─── Onboard RGB LED ──────────────────────────────────────────────────────────
+// CYD (ESP32-2432S028R) has a common-anode RGB LED: driving a pin LOW lights
+// that colour, HIGH turns it off. These GPIOs are otherwise unused by the
+// display/touch (which use 2,12,13,14,15,21,25,32,33,36,39).
+#define PIN_LED_R   4
+#define PIN_LED_G  16
+#define PIN_LED_B  17
+#define LED_ON     LOW
+#define LED_OFF    HIGH
+
+// ─── microSD card (CYD slot, on the VSPI bus — separate from the HSPI display) ─
+#define SD_SCK   18
+#define SD_MISO  19
+#define SD_MOSI  23
+#define SD_CS     5
+
+// ─── Test hooks ───────────────────────────────────────────────────────────────
+// Set to 1 to force a "lightning due now" alert (red LED + Weather banner) for
+// testing, regardless of the forecast. Leave at 0 for normal operation.
+#define FORCE_LIGHTNING  0
 
 // ─── Display ──────────────────────────────────────────────────────────────────
 #define SCREEN_W  320
@@ -95,6 +116,8 @@
 // ─── Screen IDs ───────────────────────────────────────────────────────────────
 #define NUM_SCREENS  14
 
+/** @brief Identifiers for each dashboard screen, in auto-cycle order. Values
+ *         index g_settings.screenEnabled[] and drive the uiDraw() dispatch. */
 enum ScreenID : uint8_t {
     SCR_CLOCK = 0,
     SCR_WEATHER,

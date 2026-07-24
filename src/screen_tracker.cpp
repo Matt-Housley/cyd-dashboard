@@ -11,6 +11,11 @@
 static uint32_t s_entryTime  = 0;
 static uint32_t s_lastCallMs = 0;
 
+/**
+ * @brief Cubic ease-out easing (fast start, decelerating to a stop).
+ * @param t  Normalised time; clamped to [0,1].
+ * @return Eased value in [0,1].
+ */
 static inline float easeOutCubic(float t) {
     if (t >= 1.0f) return 1.0f;
     if (t <= 0.0f) return 0.0f;
@@ -19,11 +24,18 @@ static inline float easeOutCubic(float t) {
 }
 
 // ─── Dynamic year-tick computation ───────────────────────────────────────────
-// Computes tick positions based on the ACTUAL data span (histCount × 7 days)
-// rather than the requested range years.  Yahoo Finance sometimes returns fewer
-// bars than requested (rate limits, symbol history length, etc.), so using
-// histCount * 7 days as the data-start estimate keeps the ticks consistent with
-// whatever data we actually have.
+/**
+ * @brief Compute x-axis year-tick positions/labels from the actual data span.
+ *
+ * Bases ticks on the real data span (totalPoints × 7 days) rather than the
+ * requested range, because Yahoo Finance may return fewer weekly bars than
+ * requested; this keeps the ticks aligned with the data actually plotted.
+ * @param totalPoints    Number of weekly history points.
+ * @param[out] ticks     Receives the point index of each January tick.
+ * @param[out] labels    Receives each tick's label (e.g. "'24"); [maxTicks][6].
+ * @param maxTicks       Capacity of @p ticks / @p labels.
+ * @return The number of ticks written (0 if totalPoints < 2).
+ */
 static int computeYearTicks(int totalPoints,
                              int    ticks[],
                              char   labels[][6],
@@ -60,6 +72,10 @@ static int computeYearTicks(int totalPoints,
     return count;
 }
 
+/** @brief Draw the Stocks Tracker screen: the configured symbol's current price
+ *         and % change, an animated multi-year weekly sparkline with dynamic
+ *         year ticks, and exchange/currency/change/points tiles.
+ *         See screen_tracker.h. */
 void drawScreenTracker() {
     // Detect screen entry: a gap > 500 ms since last draw means we just arrived
     uint32_t now = millis();

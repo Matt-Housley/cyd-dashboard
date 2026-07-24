@@ -1,9 +1,13 @@
 #include "screen_bbc.h"
 #include "ui_common.h"
+#include "ui.h"
 #include "config.h"
 #include "data_store.h"
 #include "fetch.h"
 #include "fonts/ui_fonts.h"
+
+// Headline hit-boxes recorded during draw, so a tap can open the full text.
+static int s_hlY[4], s_hlH[4], s_hlN = 0;
 
 // Decoded thumbnail sprite — rebuilt only when g_bbcThumbVersion changes.
 // Decoding JPEG on every draw frame (30fps) causes intermittent malloc failures
@@ -15,6 +19,10 @@ static bool        s_thumbReady   = false;
 static int         s_thumbW       = 0;
 static int         s_thumbH       = 0;
 
+/** @brief Draw the BBC News screen: masthead, a top-story panel with a cached
+ *         hero thumbnail (decoded only when a new image arrives), and three
+ *         numbered secondary headlines. Records per-headline hit-boxes so
+ *         bbcTouchUp() can open the full text. See screen_bbc.h. */
 void drawScreenBBC() {
     xSemaphoreTake(g_dataMutex, portMAX_DELAY);
     NewsData nd = g_bbcNews;
@@ -29,6 +37,8 @@ void drawScreenBBC() {
     spr.setCursor(7, y + 2);
     spr.print("BBC NEWS");
     y += 18;
+
+    s_hlN = 0;   // reset headline hit-boxes for this frame
 
     if (!nd.valid || nd.count == 0) {
         drawLoader("Fetching BBC News...");
@@ -92,11 +102,13 @@ void drawScreenBBC() {
     spr.setFont(UI_FONT_12);
     spr.setTextColor(C(COL_WHITE));
     printWrapped(textX, y + 6, nd.items[0].title, textMaxW, 16, y + topH - 4);
+    s_hlY[0] = y; s_hlH[0] = topH; s_hlN = 1;
     y += topH + 3;
 
     // ── Stories 2–4 ───────────────────────────────────────────────────────────
     for (int i = 1; i < nd.count && i < 4; i++) {
         const int rowH = 40;
+        s_hlY[i] = y; s_hlH[i] = rowH; s_hlN = i + 1;
         drawPanel(2, y, SCREEN_W - 4, rowH, 0x111111, COL_BORDER);
 
         spr.fillCircle(13, y + rowH / 2, 9, C(COL_BBC_RED));
@@ -114,4 +126,26 @@ void drawScreenBBC() {
 
         y += rowH + 2;
     }
+}
+
+/**
+ * @brief Handle a tap on the BBC News screen (finger-up).
+ *
+ * If the tap falls within a headline's recorded hit-box, opens the full
+ * headline text in a popup (useful when a title was truncated).
+ * @param x  Touch x in screen pixels (unused; headlines span the width).
+ * @param y  Touch y in screen pixels.
+ * @return true if a headline was tapped and its popup shown, false otherwise.
+ */
+bool bbcTouchUp(int32_t x, int32_t y) {
+    for (int i = 0; i < s_hlN; i++) {
+        if (y >= s_hlY[i] && y < s_hlY[i] + s_hlH[i]) {
+            char t[100] = {};
+            xSemaphoreTake(g_dataMutex, portMAX_DELAY);
+            if (i < g_bbcNews.count) strlcpy(t, g_bbcNews.items[i].title, sizeof(t));
+            xSemaphoreGive(g_dataMutex);
+            if (t[0]) { showTextPopup(t); return true; }
+        }
+    }
+    return false;
 }

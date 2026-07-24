@@ -158,8 +158,14 @@ static const PfxCty PFX_CTY[] = {
 };
 static const int PFX_CTY_LEN = sizeof(PFX_CTY) / sizeof(PFX_CTY[0]);
 
-// Returns the country name for a callsign, or "" if unknown.
-// Strips /suffix first, then tries prefixes of length 3, 2, 1.
+/**
+ * @brief Resolve a callsign to a DXCC country/entity name via its prefix.
+ *
+ * Strips any "/P", "/M" etc. suffix, then tries prefixes of length 3, 2, then 1
+ * against the PFX_CTY table (longest-match-first).
+ * @param call  Full callsign string (e.g. "GM4ABC/P").
+ * @return A static country-name string, or "" if the prefix is unknown.
+ */
 const char* callCountry(const char* call) {
     char buf[14];
     strlcpy(buf, call, sizeof(buf));
@@ -178,6 +184,11 @@ const char* callCountry(const char* call) {
 }
 
 // ─── Compass point from bearing (degrees 0–359) ───────────────────────────────
+/**
+ * @brief Convert a bearing to one of 8 compass points.
+ * @param deg  Bearing in degrees (0–359); values are wrapped modulo 360.
+ * @return A static string: "N", "NE", "E", "SE", "S", "SW", "W", or "NW".
+ */
 static const char* compassPt(uint16_t deg) {
     // 8 points, each 45°.  Offset by 22.5° so North is centred on 0/360.
     static const char* pts[8] = { "N","NE","E","SE","S","SW","W","NW" };
@@ -185,6 +196,12 @@ static const char* compassPt(uint16_t deg) {
 }
 
 // ─── Band name from frequency (kHz) ───────────────────────────────────────────
+/**
+ * @brief Map a frequency to its amateur band name.
+ * @param kHz  Frequency in kilohertz.
+ * @return A static band string ("160m", "20m", "70c", ...), or "??" if the
+ *         frequency falls outside every known amateur allocation.
+ */
 static const char* freqBand(float kHz) {
     if (kHz >=  1800 && kHz <  2000) return "160m";
     if (kHz >=  3500 && kHz <  4000) return  "80m";
@@ -204,6 +221,11 @@ static const char* freqBand(float kHz) {
 }
 
 // ─── Accent colour per band ────────────────────────────────────────────────────
+/**
+ * @brief Pick a distinctive accent colour for a band name.
+ * @param b  Band string as returned by freqBand() (e.g. "20m"); may be null/empty.
+ * @return An RGB888 colour; COL_GREY for null/empty, COL_GREY_L for unrecognised.
+ */
 static uint32_t bandColor(const char* b) {
     if (!b || !b[0]) return COL_GREY;
     switch (b[0]) {
@@ -230,6 +252,12 @@ static uint32_t bandColor(const char* b) {
     return COL_GREY_L;
 }
 
+/**
+ * @brief Infer the operating mode from the first word of a DX-spot comment.
+ * @param cmt  Spot comment (e.g. "FT8 -12dB"); may be null/empty.
+ * @return A SPOT_MODE_* bit; SPOT_MODE_OTHER for empty input or an unrecognised
+ *         leading word.
+ */
 static uint8_t classifyDXComment(const char* cmt) {
     if (!cmt || !cmt[0]) return SPOT_MODE_OTHER;
     char word[8];
@@ -240,6 +268,9 @@ static uint8_t classifyDXComment(const char* cmt) {
 }
 
 // ─── Main draw function ────────────────────────────────────────────────────────
+/** @brief Draw the DX Spots screen: recent cluster spots (respecting the mode
+ *         filter) with band-coloured rows, resolved country, bearing/distance,
+ *         spotter, and comment. See screen_dxspots.h. */
 void drawScreenDXSpots() {
     xSemaphoreTake(g_dataMutex, portMAX_DELAY);
     DXSpotsData ds = g_dxSpots;

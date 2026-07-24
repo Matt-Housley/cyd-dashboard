@@ -61,3 +61,12 @@ CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=4096
 # succeeds on every run — and PADLOCK appeared in a run where the heap took no
 # damage at all.  Software AES would only slow handshakes that already take
 # 5–25 s.  Revisit only if evidence points back at it.
+#
+# ── Task watchdog timeout ─────────────────────────────────────────────────────
+# The ECDHE key exchange during an HTTPS handshake is CPU-bound (software
+# bignum add/sub in the curve point math; HW MPI only covers multiply) and can
+# hold a core for >5 s without yielding, starving the idle task.  With the
+# default 5 s TWDT that printed harmless — non-panic — backtrace pairs on slow
+# handshakes.  Raise the timeout so a slow handshake fits inside it while the
+# watchdog keeps its protective value.
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=15

@@ -9,6 +9,11 @@
 
 // ─── Band colour from frequency in MHz ────────────────────────────────────────
 // If-chain keeps everything in flash (.rodata / code) — no DRAM struct arrays.
+/**
+ * @brief Pick a distinctive colour for a frequency's amateur band.
+ * @param MHz  Frequency in megahertz.
+ * @return An RGB888 colour; a neutral grey (0x888888) for out-of-band input.
+ */
 static uint32_t pskBandColor(float MHz) {
     if (MHz >=  1.8f   && MHz <   2.0f)  return 0x883333UL;  // 160m dark red
     if (MHz >=  3.5f   && MHz <   4.0f)  return 0xE53935UL;  // 80m  red
@@ -27,7 +32,12 @@ static uint32_t pskBandColor(float MHz) {
     return 0x888888UL;
 }
 
-// Returns band label for the legend, or nullptr if unrecognised.
+/**
+ * @brief Map a frequency to its amateur band name (for the legend).
+ * @param MHz  Frequency in megahertz.
+ * @return A static band string ("20m", "70cm", ...), or nullptr if the
+ *         frequency is outside every known amateur allocation.
+ */
 static const char* pskBandName(float MHz) {
     if (MHz >=  1.8f   && MHz <   2.0f)  return "160m";
     if (MHz >=  3.5f   && MHz <   4.0f)  return "80m";
@@ -57,9 +67,13 @@ static float _mapLonRng = 360.0f;
 static float _mapLatTop = 75.0f;
 static float _mapLatRng = 138.0f;
 
+/** @brief Project a longitude to a screen x using the current map bounds.
+ *  @param lon  Longitude in degrees. @return Screen x in pixels. */
 static inline int _lonToX(float lon) {
     return (int)((lon - _mapLonMin) / _mapLonRng * _MAP_W);
 }
+/** @brief Project a latitude to a screen y using the current map bounds.
+ *  @param lat  Latitude in degrees. @return Screen y in pixels. */
 static inline int _latToY(float lat) {
     return _MAP_Y0 + (int)((_mapLatTop - lat) / _mapLatRng * _MAP_H);
 }
@@ -72,6 +86,12 @@ static int   s_iFar = -1, s_iLoud = -1;
 static float s_farDist = 0;
 
 // ─── Haversine great-circle distance in km ────────────────────────────────────
+/**
+ * @brief Great-circle distance between two lat/lon points (haversine).
+ * @param la1,lo1  First point's latitude/longitude in degrees.
+ * @param la2,lo2  Second point's latitude/longitude in degrees.
+ * @return Distance in kilometres.
+ */
 static float _gcKm(float la1, float lo1, float la2, float lo2) {
     const float R   = 6371.0f;
     const float D2R = (float)M_PI / 180.0f;
@@ -84,6 +104,10 @@ static float _gcKm(float la1, float lo1, float la2, float lo2) {
 }
 
 // ─── Main draw function ───────────────────────────────────────────────────────
+/** @brief Draw the PSK Reporter screen: an auto-zoomed world map with the QTH,
+ *         propagation lines and band-coloured dots for each station that heard
+ *         the configured callsign, a band legend, furthest/loudest pulsing
+ *         markers, and a tap-to-info overlay. See screen_pskreporter.h. */
 void drawScreenPSKReporter() {
     // ── Reception spots ───────────────────────────────────────────────────────
     xSemaphoreTake(g_dataMutex, portMAX_DELAY);
@@ -267,6 +291,14 @@ void drawScreenPSKReporter() {
             if (!dup) seenFreq[seenCount++] = f;
         }
 
+        // Sort bands high→low frequency for the legend (insertion sort — tiny n).
+        for (int i = 1; i < seenCount; i++) {
+            float key = seenFreq[i];
+            int k = i - 1;
+            while (k >= 0 && seenFreq[k] < key) { seenFreq[k + 1] = seenFreq[k]; k--; }
+            seenFreq[k + 1] = key;
+        }
+
         if (seenCount > 0) {
             const int ROW_H = 12;
             const int LEG_W = 38;
@@ -389,9 +421,19 @@ void drawScreenPSKReporter() {
     }
 }
 
+/** @brief Clear any open PSK info overlay, e.g. when leaving the screen.
+ *         See screen_pskreporter.h. */
 void pskClearSelection() { s_pskSelected = -1; }
 
-// ─── Touch handler — returns true if tap was consumed ─────────────────────────
+/**
+ * @brief Handle a tap on the PSK Reporter screen (finger-up).
+ *
+ * Dismisses an open overlay, or selects the furthest/loudest pulsing marker if
+ * the tap lands near it.
+ * @param x  Touch x in screen pixels.
+ * @param y  Touch y in screen pixels.
+ * @return true if the tap was consumed (selection changed), false otherwise.
+ */
 bool pskTouchUp(int32_t x, int32_t y) {
     const int HIT = 25;
 

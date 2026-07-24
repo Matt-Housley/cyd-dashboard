@@ -65,6 +65,8 @@ static const TzAlias TZ_ALIASES[] = {
 };
 static const int TZ_ALIAS_COUNT = sizeof(TZ_ALIASES) / sizeof(TZ_ALIASES[0]);
 
+/** @brief Find the TZ_LIST index for an IANA zone name, checking aliases too.
+ *         See settings.h. @return TZ_LIST index, or -1 if unmatched. */
 int tzFindByIana(const char* iana) {
     if (!iana || !iana[0]) return -1;
     for (int i = 0; i < TZ_COUNT; i++)
@@ -87,6 +89,8 @@ const SymEntry SYM_LIST[SYM_COUNT] = {
 };
 
 // ─── Maidenhead → lat/lon ─────────────────────────────────────────────────────
+/** @brief Convert a Maidenhead locator to its centre lat/lon. See settings.h.
+ *         Sets both out-params to 0 for a grid shorter than 4 characters. */
 void gridToLatLon(const char* grid, float& lat, float& lon) {
     if (!grid || strlen(grid) < 4) { lat = 0.0f; lon = 0.0f; return; }
     char g[7];
@@ -111,6 +115,8 @@ void gridToLatLon(const char* grid, float& lat, float& lon) {
 }
 
 // ─── Mode classification ──────────────────────────────────────────────────────
+/** @brief Classify a mode string into a SPOT_MODE_* bit. See settings.h.
+ *         @return The matching bit, or SPOT_MODE_OTHER if unrecognised. */
 uint8_t classifyMode(const char* m) {
     if (!m || !m[0]) return SPOT_MODE_OTHER;
     if (strcasecmp(m, "CW")   == 0) return SPOT_MODE_CW;
@@ -132,6 +138,10 @@ uint8_t classifyMode(const char* m) {
 }
 
 // ─── Defaults ─────────────────────────────────────────────────────────────────
+/**
+ * @brief Populate a settings struct with the built-in factory defaults.
+ * @param[out] s  Settings struct to overwrite with defaults.
+ */
 static void applyDefaults(AppSettings& s) {
     s.version = SETTINGS_VERSION;
     strlcpy(s.grid,        QTH_GRID,           sizeof(s.grid));
@@ -148,12 +158,23 @@ static void applyDefaults(AppSettings& s) {
     s.touchCalValid = false;
     memset(s.touchCal, 0, sizeof(s.touchCal));
     s.issJumpEnabled = true;
+    s.issLedEnabled  = true;
+    s.lightningLedEnabled = true;
+    s.startupLedEnabled   = true;
+    s.screenshotHoldEnabled = false;
     s.brightness     = 200;
     s.useCelsius     = true;
     s.useKm          = false;
+    s.ft8BandFilter  = FT8_BAND_ALL;
+    s.issFreqSstv    = 437.550f;
+    s.issFreqAprs    = 145.825f;
+    s.issFreqRptIn   = 145.990f;
+    s.issFreqRptOut  = 437.800f;
 }
 
 // ─── Load ─────────────────────────────────────────────────────────────────────
+/** @brief Load g_settings from SPIFFS, falling back to defaults on any error
+ *         (mount failure, missing file, or JSON parse error). See settings.h. */
 void settingsLoad() {
     applyDefaults(g_settings);
 
@@ -188,9 +209,18 @@ void settingsLoad() {
     strlcpy(g_settings.callsign,    doc["call"]   | "M0KGO", sizeof(g_settings.callsign));
     g_settings.modeFilter =          doc["modes"]    | (int)SPOT_MODE_ALL;
     g_settings.issJumpEnabled =      doc["issJump"]   | true;
+    g_settings.issLedEnabled  =      doc["issLed"]    | true;
+    g_settings.lightningLedEnabled =  doc["ltngLed"]  | true;
+    g_settings.startupLedEnabled   =  doc["bootLed"]  | true;
+    g_settings.screenshotHoldEnabled = doc["ssHold"]  | false;
     g_settings.brightness     = (uint8_t)(doc["bright"] | 200);
     g_settings.useCelsius     =      doc["celsius"]  | true;
     g_settings.useKm          =      doc["useKm"]    | false;
+    g_settings.ft8BandFilter  = (uint16_t)(doc["ft8bands"] | FT8_BAND_ALL);
+    g_settings.issFreqSstv    = doc["fSstv"]   | 437.550;
+    g_settings.issFreqAprs    = doc["fAprs"]   | 145.825;
+    g_settings.issFreqRptIn   = doc["fRptIn"]  | 145.990;
+    g_settings.issFreqRptOut  = doc["fRptOut"] | 437.800;
 
     JsonArray tc = doc["tcal"].as<JsonArray>();
     if (tc.size() == 8) {
@@ -213,6 +243,7 @@ void settingsLoad() {
 }
 
 // ─── Save ─────────────────────────────────────────────────────────────────────
+/** @brief Serialise g_settings to /settings.json on SPIFFS. See settings.h. */
 void settingsSave() {
     if (!SPIFFS.begin(true)) { Serial.println("[settings] SPIFFS unavailable"); return; }
 
@@ -228,9 +259,18 @@ void settingsSave() {
     doc["call"]   = g_settings.callsign;
     doc["modes"]   = g_settings.modeFilter;
     doc["issJump"] = g_settings.issJumpEnabled;
+    doc["issLed"]  = g_settings.issLedEnabled;
+    doc["ltngLed"] = g_settings.lightningLedEnabled;
+    doc["bootLed"] = g_settings.startupLedEnabled;
+    doc["ssHold"]  = g_settings.screenshotHoldEnabled;
     doc["bright"]  = g_settings.brightness;
     doc["celsius"] = g_settings.useCelsius;
     doc["useKm"]   = g_settings.useKm;
+    doc["ft8bands"] = g_settings.ft8BandFilter;
+    doc["fSstv"]   = g_settings.issFreqSstv;
+    doc["fAprs"]   = g_settings.issFreqAprs;
+    doc["fRptIn"]  = g_settings.issFreqRptIn;
+    doc["fRptOut"] = g_settings.issFreqRptOut;
 
     JsonArray en = doc["screens"].to<JsonArray>();
     for (int i = 0; i < NUM_SCREENS; i++) en.add(g_settings.screenEnabled[i]);

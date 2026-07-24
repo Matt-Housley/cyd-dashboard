@@ -20,6 +20,7 @@ extern int getWiFiBars();
 #include "screen_sota.h"
 #include "screen_contests.h"
 #include "screen_settings.h"
+#include "settings.h"
 #include "fonts/ui_fonts.h"
 
 // ─── Shared sprite + display pointer ─────────────────────────────────────────
@@ -29,6 +30,7 @@ static LGFX* gDisplay = nullptr;
 
 // ─── Shared primitive implementations ────────────────────────────────────────
 
+/** @brief Draw a sparkline with translucent fill (see ui_common.h). */
 void drawSparkline(int x, int y, int w, int h,
                    const float* vals, int count, uint32_t lineCol,
                    int visibleCount) {
@@ -72,6 +74,8 @@ void drawSparkline(int x, int y, int w, int h,
     }
 }
 
+/** @brief Word-wrap and draw text within a box (see ui_common.h).
+ *  @return The y position just after the last line printed. */
 int printWrapped(int x, int y, const char* text, int maxW, int lineH, int maxY) {
     String src(text);
     String line;
@@ -106,6 +110,7 @@ int printWrapped(int x, int y, const char* text, int maxW, int lineH, int maxY) 
     return y;
 }
 
+/** @brief Format a price with thousands separators (see ui_common.h). */
 void fmtPrice(char* buf, size_t bufLen, float price) {
     // Build without locale grouping, then insert commas
     char raw[16];
@@ -120,11 +125,10 @@ void fmtPrice(char* buf, size_t bufLen, float price) {
     int oi = 0;
     int commaEvery = 3;
     for (int i = 0; raw[i]; i++) {
-        if (i < dotPos) {
-            int fromRight = dotPos - i - 1;
-            if (fromRight > 0 && fromRight % commaEvery == 0) {
-                out[oi++] = ',';
-            }
+        // Comma before digit i when a whole number of 3-digit groups follows it
+        // within the integer part (and i isn't the leading digit).
+        if (i > 0 && i < dotPos && (dotPos - i) % commaEvery == 0) {
+            out[oi++] = ',';
         }
         out[oi++] = raw[i];
     }
@@ -132,6 +136,7 @@ void fmtPrice(char* buf, size_t bufLen, float price) {
     strlcpy(buf, out, bufLen);
 }
 
+/** @brief Draw a centred loader message with animated dots (see ui_common.h). */
 void drawLoader(const char* msg) {
     spr.setFont(UI_FONT_12);
     spr.setTextColor(C(COL_GREY));
@@ -175,14 +180,16 @@ static const char* SCREEN_LABELS[NUM_SCREENS] = {
 };
 
 // Status bar button X positions — shared with touch handler via getStatusBarLayout()
-// All four right-side slots use the same width for even spacing.
+// All right-side slots use the same width for even spacing.
 #define SB_SLOT_W    16
 
-static int s_sbCogX, s_sbWifiX, s_sbAdvX, s_sbPlayX;
+static int s_sbCogX, s_sbWifiX, s_sbCircX, s_sbPlayX;
 
-void getStatusBarLayout(int& playX, int& advX, int& wifiX, int& cogX) {
+/** @brief Report the status-bar button x-positions for touch hit-testing
+ *         (see ui.h). Valid after the most recent uiDraw(). */
+void getStatusBarLayout(int& playX, int& circX, int& wifiX, int& cogX) {
     playX = s_sbPlayX;
-    advX  = s_sbAdvX;
+    circX = s_sbCircX;
     wifiX = s_sbWifiX;
     cogX  = s_sbCogX;
 }
@@ -194,6 +201,7 @@ static char s_wifiIP[16]   = {};
 static char s_wifiMAC[18]  = {};
 static int  s_wifiRSSI     = 0;
 
+/** @brief Populate and show the WiFi info overlay (see ui.h). */
 void showWifiOverlay(const char* ssid, const char* ip, const char* mac, int rssi) {
     strlcpy(s_wifiSSID, ssid, sizeof(s_wifiSSID));
     strlcpy(s_wifiIP,   ip,   sizeof(s_wifiIP));
@@ -201,9 +209,12 @@ void showWifiOverlay(const char* ssid, const char* ip, const char* mac, int rssi
     s_wifiRSSI    = rssi;
     s_wifiOverlay = true;
 }
+/** @brief Hide the WiFi info overlay (see ui.h). */
 void hideWifiOverlay()      { s_wifiOverlay = false; }
+/** @brief Whether the WiFi info overlay is showing (see ui.h). @return true if visible. */
 bool wifiOverlayVisible()   { return s_wifiOverlay; }
 
+/** @brief Draw the WiFi info overlay box (SSID/IP/MAC/signal) from cached state. */
 static void drawWifiOverlay() {
     spr.setFont(UI_FONT_9);
 
@@ -262,6 +273,201 @@ static void drawWifiOverlay() {
     }
 }
 
+// ─── Toast (brief bottom-centre message) ─────────────────────────────────────
+static char          s_toastMsg[40] = {};
+static unsigned long s_toastMs      = 0;
+/** @brief Show a brief bottom-centre toast message (~2.5 s) (see ui.h). */
+void showToast(const char* msg) { strlcpy(s_toastMsg, msg, sizeof(s_toastMsg)); s_toastMs = millis(); }
+
+/** @brief Draw the toast message if one is active and not yet expired. */
+static void drawToast() {
+    if (s_toastMs == 0 || millis() - s_toastMs > 2500) return;
+    spr.setFont(UI_FONT_12);
+    int tw = spr.textWidth(s_toastMsg);
+    int bw = tw + 20, bh = 22;
+    int bx = (SCREEN_W - bw) / 2, by = SCREEN_H - bh - 8;
+    spr.fillRoundRect(bx, by, bw, bh, 4, spr.color888(20, 30, 20));
+    spr.drawRoundRect(bx, by, bw, bh, 4, C(COL_GREEN));
+    spr.setTextColor(C(COL_WHITE));
+    spr.setCursor(bx + 10, by + 5);
+    spr.print(s_toastMsg);
+}
+
+// ─── Full-text popup (tapped news headline) ──────────────────────────────────
+static bool          s_textPopup = false;
+static unsigned long s_popupMs   = 0;
+static char          s_popupText[128] = {};
+
+/** @brief Show the full-text popup (see ui.h). */
+void showTextPopup(const char* text) {
+    strlcpy(s_popupText, text, sizeof(s_popupText));
+    s_textPopup = true;
+    s_popupMs   = millis();
+}
+/** @brief Hide the full-text popup immediately (see ui.h). */
+void hideTextPopup() { s_textPopup = false; }
+/** @brief Whether the full-text popup is visible, auto-closing after 30 s (see ui.h).
+ *  @return true if the popup should be drawn this frame. */
+bool textPopupVisible() {
+    if (s_textPopup && millis() - s_popupMs > 30000) s_textPopup = false;  // auto-close
+    return s_textPopup;
+}
+
+/**
+ * @brief Count how many lines @p text wraps to at a given width.
+ *
+ * Mirrors printWrapped()'s wrapping so a popup can be sized before drawing.
+ * The current font must already be set.
+ * @param text  Text to measure.
+ * @param maxW  Maximum line width in pixels.
+ * @return Number of wrapped lines (at least 1).
+ */
+static int wrapLineCount(const char* text, int maxW) {
+    String src(text), line;
+    int pos = 0, slen = (int)src.length(), lines = 0;
+    while (pos <= slen) {
+        int sp = src.indexOf(' ', pos); if (sp < 0) sp = slen;
+        String word = src.substring(pos, sp);
+        if (word.isEmpty() && sp == slen) break;
+        String trial = line.isEmpty() ? word : line + ' ' + word;
+        if ((int)spr.textWidth(trial.c_str()) <= maxW || line.isEmpty()) line = trial;
+        else { lines++; line = word; }
+        pos = sp + 1;
+    }
+    if (!line.isEmpty()) lines++;
+    return lines < 1 ? 1 : lines;
+}
+
+/** @brief Draw the full-text popup box (auto-sized to the wrapped text). */
+static void drawTextPopup() {
+    const int PAD   = 10;
+    const int BW    = SCREEN_W - 24;
+    const int textW = BW - 2 * PAD;
+    const int lineH = 16;
+    const int hintH = 12;
+
+    spr.setFont(UI_FONT_12);
+    int textH = wrapLineCount(s_popupText, textW) * lineH;
+    int BH = PAD + textH + 6 + hintH + 6;
+    if (BH > SCREEN_H - STATUS_H - 8) BH = SCREEN_H - STATUS_H - 8;
+    int BX = (SCREEN_W - BW) / 2;
+    int BY = (SCREEN_H - BH) / 2;
+    if (BY < STATUS_H + 4) BY = STATUS_H + 4;
+
+    spr.fillRoundRect(BX, BY, BW, BH, 5, spr.color888(16, 22, 32));
+    spr.drawRoundRect(BX, BY, BW, BH, 5, C(COL_ORANGE));
+
+    spr.setFont(UI_FONT_12);
+    spr.setTextColor(C(COL_WHITE));
+    printWrapped(BX + PAD, BY + PAD, s_popupText, textW, lineH, BY + PAD + textH + 2);
+
+    spr.setFont(UI_FONT_9);
+    spr.setTextColor(C(COL_GREY));
+    const char* hint = "tap to close";
+    spr.setCursor(BX + BW - spr.textWidth(hint) - 8, BY + BH - hintH - 3);
+    spr.print(hint);
+}
+
+// ─── Screen-picker menu ───────────────────────────────────────────────────────
+// Opened by the Circle button. Lists every enabled screen in a two-column grid;
+// tapping a cell jumps straight to that screen. The cell rects are recorded on
+// each draw so the touch handler can hit-test against exactly what's on screen.
+static bool s_menuOpen = false;
+
+#define MENU_MAX  NUM_SCREENS
+static int s_menuCount = 0;              // number of cells currently laid out
+static int s_menuId[MENU_MAX];           // screen ID behind each cell
+static int s_menuX[MENU_MAX], s_menuY[MENU_MAX], s_menuW[MENU_MAX], s_menuH[MENU_MAX];
+
+/** @brief Open the jump-to-screen picker menu (see ui.h). */
+void showScreenMenu()    { s_menuOpen = true; }
+/** @brief Close the jump-to-screen picker menu (see ui.h). */
+void hideScreenMenu()    { s_menuOpen = false; }
+/** @brief Whether the jump-to-screen picker is open (see ui.h). @return true if open. */
+bool screenMenuVisible() { return s_menuOpen; }
+
+/** @brief Recompute the enabled-screen list and per-cell grid geometry into the
+ *         s_menu* static arrays, ready for drawing and hit-testing. */
+static void buildScreenMenu() {
+    s_menuCount = 0;
+    for (int i = 0; i < NUM_SCREENS && s_menuCount < MENU_MAX; i++)
+        if (g_settings.screenEnabled[i]) s_menuId[s_menuCount++] = i;
+
+    if (s_menuCount == 0) return;
+
+    const int COLS = 2;
+    const int rows = (s_menuCount + COLS - 1) / COLS;   // left column filled first
+
+    const int MX   = 4;                 // outer margin
+    const int GY0  = STATUS_H + 22;      // grid top (below the title)
+    const int GAP  = 4;
+    const int gridH = SCREEN_H - GY0 - MX;
+    const int colW  = (SCREEN_W - 2 * MX - GAP) / COLS;
+    const int rowH  = (gridH - (rows - 1) * GAP) / rows;
+
+    for (int k = 0; k < s_menuCount; k++) {
+        int col = k / rows;
+        int row = k % rows;
+        s_menuX[k] = MX + col * (colW + GAP);
+        s_menuY[k] = GY0 + row * (rowH + GAP);
+        s_menuW[k] = colW;
+        s_menuH[k] = rowH;
+    }
+}
+
+/**
+ * @brief Draw the jump-to-screen picker grid, highlighting the current screen.
+ * @param screenID  The currently displayed screen (drawn as selected).
+ */
+static void drawScreenMenu(int screenID) {
+    buildScreenMenu();
+
+    // Dim the content area behind the menu
+    spr.fillRect(0, STATUS_H, SCREEN_W, SCREEN_H - STATUS_H, C(COL_BG));
+
+    spr.setFont(UI_FONT_12);
+    spr.setTextColor(C(COL_ORANGE));
+    spr.setCursor(6, STATUS_H + 4);
+    spr.print("Jump to screen");
+
+    spr.setFont(UI_FONT_9);
+    for (int k = 0; k < s_menuCount; k++) {
+        int id  = s_menuId[k];
+        bool cur = (id == screenID);
+        int x = s_menuX[k], y = s_menuY[k], w = s_menuW[k], h = s_menuH[k];
+
+        spr.fillRoundRect(x, y, w, h, 3, C(COL_BG));
+        spr.drawRoundRect(x, y, w, h, 3, C(cur ? COL_ORANGE : COL_BORDER));
+
+        // Marker dot + label, vertically centred
+        int cy = y + h / 2;
+        spr.fillCircle(x + 8, cy, 2, C(cur ? COL_ORANGE : COL_GREY));
+        spr.setTextColor(C(cur ? COL_ORANGE : COL_WHITE));
+        spr.setCursor(x + 16, cy - 5);
+        spr.print(SCREEN_LABELS[id]);
+    }
+}
+
+/** @brief Hit-test a tap against the open screen-picker menu (see ui.h).
+ *  @return The tapped screen's ID, or -1 if the tap missed every cell. */
+int screenMenuHitTest(int x, int y) {
+    for (int k = 0; k < s_menuCount; k++)
+        if (x >= s_menuX[k] && x < s_menuX[k] + s_menuW[k] &&
+            y >= s_menuY[k] && y < s_menuY[k] + s_menuH[k])
+            return s_menuId[k];
+    return -1;
+}
+
+/**
+ * @brief Draw the top status bar: screen counter/label, centre clock, and the
+ *        right-side play/pause, jump-to-screen, WiFi, and cog icons.
+ *
+ * Records each right-side icon's x-position into the s_sb* statics for
+ * getStatusBarLayout() to expose to the touch handler.
+ * @param screenID  Currently displayed screen (for the label and counter).
+ * @param autoPlay  Whether auto-cycling is on (selects play vs pause icon).
+ * @param paused    Whether cycling is paused (reserved; currently unused here).
+ */
 static void drawStatusBar(int screenID, bool autoPlay, bool paused) {
     spr.fillRect(0, 0, SCREEN_W, STATUS_H, C(COL_BG));
     spr.drawFastHLine(0, STATUS_H - 1, SCREEN_W, C(COL_BORDER));
@@ -277,13 +483,18 @@ static void drawStatusBar(int screenID, bool autoPlay, bool paused) {
     const int IMY  = (IT + IB) / 2;    // icon vertical midpoint
     int rx = SCREEN_W - 3;
 
-    // Hamburger menu (settings)
+    // Settings cog — 11x11 8-tooth gear bitmap with a centre hole
     s_sbCogX = rx - SB_SLOT_W;
     {
-        int bx = s_sbCogX + 3, bw = SB_SLOT_W - 6;
-        spr.fillRect(bx, IT,          bw, 2, C(COL_GREY));
-        spr.fillRect(bx, IMY - 1,     bw, 2, C(COL_GREY));
-        spr.fillRect(bx, IB - 2,      bw, 2, C(COL_GREY));
+        static const uint16_t GEAR11[11] = {
+            0x0D8, 0x0F8, 0x1FC, 0x7FF, 0x78F, 0x38E, 0x78F, 0x7FF, 0x1FC, 0x0F8, 0x0D8
+        };
+        int gx = s_sbCogX + 3, gy = IT;   // 11px tall fills the icon band (IT..IB)
+        uint32_t col = C(COL_GREY);
+        for (int r = 0; r < 11; r++)
+            for (int cbit = 0; cbit < 11; cbit++)
+                if (GEAR11[r] & (1 << (10 - cbit)))
+                    spr.drawPixel(gx + cbit, gy + r, col);
     }
     rx = s_sbCogX - GAP;
 
@@ -300,14 +511,15 @@ static void drawStatusBar(int screenID, bool autoPlay, bool paused) {
     }
     rx = s_sbWifiX - GAP;
 
-    // Advance button (>>)
-    s_sbAdvX = rx - SB_SLOT_W;
+    // Jump-to-screen menu — hamburger (three horizontal bars)
+    s_sbCircX = rx - SB_SLOT_W;
     {
-        int ax = s_sbAdvX + 2;
-        spr.fillTriangle(ax,     IT, ax,     IB, ax + 5, IMY, C(COL_GREY));
-        spr.fillTriangle(ax + 5, IT, ax + 5, IB, ax + 10, IMY, C(COL_GREY));
+        int bx = s_sbCircX + 3, bw = SB_SLOT_W - 6;
+        spr.fillRect(bx, IT,      bw, 2, C(COL_GREY));
+        spr.fillRect(bx, IMY - 1, bw, 2, C(COL_GREY));
+        spr.fillRect(bx, IB - 2,  bw, 2, C(COL_GREY));
     }
-    rx = s_sbAdvX - GAP;
+    rx = s_sbCircX - GAP;
 
     // Play/Pause button
     s_sbPlayX = rx - SB_SLOT_W;
@@ -348,6 +560,8 @@ static void drawStatusBar(int screenID, bool autoPlay, bool paused) {
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
+/** @brief Allocate the shared framebuffer sprite, falling back to 8-bit depth
+ *         (and halting with an on-screen error if even that fails). See ui.h. */
 void uiInit(LGFX* display) {
     gDisplay = display;
     spr.setColorDepth(16);
@@ -372,6 +586,8 @@ void uiInit(LGFX* display) {
     }
 }
 
+/** @brief Render a screen (or the settings overlay) plus any active overlays
+ *         into the sprite and push it to the display. See ui.h. */
 void uiDraw(int screenID, bool autoPlay, bool paused, bool inSettings) {
     spr.fillSprite(C(COL_BG));
     drawStatusBar(screenID, autoPlay, paused);
@@ -397,7 +613,11 @@ void uiDraw(int screenID, bool autoPlay, bool paused, bool inSettings) {
         }
     }
 
+    if (textPopupVisible() && (screenID == SCR_BBC || screenID == SCR_APPLE))
+        drawTextPopup();
+    if (s_menuOpen)   drawScreenMenu(screenID);
     if (s_wifiOverlay) drawWifiOverlay();
+    drawToast();
 
     if (gDisplay) spr.pushSprite(gDisplay, 0, 0);
 }

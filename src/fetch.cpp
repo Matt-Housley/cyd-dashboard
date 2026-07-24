@@ -13,7 +13,7 @@
 #include <lwip/sockets.h>   // lwip_setsockopt / SO_LINGER
 
 // ─── Debug timestamp helper ───────────────────────────────────────────────────
-// Prints elapsed time since boot as [MM:SS.mmm] prefix on log lines.
+/** @brief Print an "[MM:SS.mmm] " elapsed-since-boot prefix on the serial log. */
 static void logTs() {
     uint32_t ms = millis();
     uint32_t s  = ms / 1000; ms %= 1000;
@@ -85,21 +85,27 @@ uint32_t g_appleThumbVersion = 0;
 //   lwIP, etc.) can nibble it between setup() and the first fetch.
 //   Reclaimed after the WiFiClientSecure destructor runs.
 
+/** @brief Free the 12 KB x509 reserve so the TLS cert parser can use its slot. */
 static void sslX509Release()  { if (g_sslX509R)  { heap_caps_free(g_sslX509R);  g_sslX509R  = nullptr; } }
+/** @brief Re-take the 12 KB x509 reserve after TLS work completes. */
 static void sslX509Reclaim()  { if (!g_sslX509R)   g_sslX509R  = heap_caps_malloc(12288, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT); }
+/** @brief Free the 6 KB SSL-context reserve so the TLS client ctor can use its slot. */
 static void sslCtxRelease()   { if (g_sslCtxR)   { heap_caps_free(g_sslCtxR);   g_sslCtxR   = nullptr; } }
+/** @brief Re-take the 6 KB SSL-context reserve after the TLS client is destroyed. */
 static void sslCtxReclaim()   { if (!g_sslCtxR)    g_sslCtxR   = heap_caps_malloc(6136,  MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT); }
 
-// Release x509 slot just before http.GET() (ctx freed earlier, before the
-// WiFiClientSecure constructor).  Freeing x509 coalesces with the natural
-// ~26 KB free block → ~38.9 KB available for mbedTLS in_buf + out_buf.
+/** @brief Release the x509 reserve just before http.GET(), logging the resulting
+ *         largest-block/heap; coalesces to ~38.9 KB for the mbedTLS buffers. */
 static void sslDataRelease() {
     sslX509Release();
     LOG("[ssl] data-released  lb8bit=%u  heap=%u\n",
                   heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
                   ESP.getFreeHeap());
 }
-// Reclaim all slots after the WiFiClientSecure destructor has run.
+/** @brief Re-take both SSL reserves after a TLS connection is fully torn down.
+ *
+ * If the 6 KB context slot cannot be reclaimed it is permanently lost (all
+ * future HTTPS would fail), so the device logs and reboots. */
 static void sslAllReclaim() {
     sslX509Reclaim();
     sslCtxReclaim();
@@ -119,6 +125,14 @@ static void sslAllReclaim() {
 // ─── Stream-read helpers ──────────────────────────────────────────────────────
 
 
+/**
+ * @brief Read up to @p maxLen bytes from an HTTP response stream, then drain/close.
+ * @param http       Active HTTPClient with a live response.
+ * @param buf        Destination buffer.
+ * @param maxLen     Maximum bytes to read into @p buf.
+ * @param timeoutMs  Overall read timeout in milliseconds.
+ * @return Number of bytes actually read (may be less than @p maxLen).
+ */
 static size_t streamReadBytes(HTTPClient& http, uint8_t* buf, size_t maxLen,
                                unsigned long timeoutMs) {
     WiFiClient* stream = http.getStreamPtr();
@@ -150,6 +164,11 @@ static size_t streamReadBytes(HTTPClient& http, uint8_t* buf, size_t maxLen,
 }
 
 // ─── WiFi guard ───────────────────────────────────────────────────────────────
+/**
+ * @brief Ensure WiFi is connected, attempting a reconnect if it has dropped.
+ * @return true if connected (already or after reconnect), false if reconnect
+ *         failed within the retry window.
+ */
 static bool ensureWiFi() {
     if (WiFi.status() == WL_CONNECTED) return true;
     Serial.println("[fetch] WiFi lost — reconnecting");
@@ -173,9 +192,13 @@ static bool ensureWiFi() {
 // These helpers consume the response as it arrives, so no full-body buffer ever
 // exists and memory use is independent of response size.
 
-// Drains anything the consumer left, then closes.  Reading to EOF lets the
-// server send FIN before we do, so lwIP does not park the remainder in a
-// permanent receive buffer.
+/**
+ * @brief Drain any unread response bytes, then close the connection.
+ *
+ * Reading to EOF lets the server send FIN first so lwIP does not park the
+ * remainder in a permanent receive buffer.
+ * @param http  The HTTPClient to drain and end.
+ */
 static void drainAndEnd(HTTPClient& http) {
     WiFiClient* s = http.getStreamPtr();
     if (s) {
@@ -193,10 +216,21 @@ static void drainAndEnd(HTTPClient& http) {
 // Consumer callback: reads from the live stream, returns true on success.
 typedef bool (*StreamConsumer)(HTTPClient& http, void* ctx);
 
-// Runs the SSL reserve dance and, on HTTP 200, hands the live stream to
-// consume().  Replaces httpGet() for every source that can parse incrementally.
-// userAgent: overrides the default only where a server demands it (Yahoo's
-// finance endpoint rejects non-browser agents).
+/**
+ * @brief GET a URL and, on HTTP 200, hand the live stream to a consumer callback.
+ *
+ * Performs the SSL reserve release/reclaim dance for HTTPS, retries transient
+ * failures, and treats allocation/PADLOCK/BIGNUM SSL errors as fatal (no retry).
+ * Replaces a buffer-the-whole-body approach for sources that parse incrementally.
+ * @param url        Target URL (http:// or https://).
+ * @param consume    Callback invoked with the live stream; returns true on success.
+ * @param ctx        Opaque context pointer passed through to @p consume.
+ * @param who        Short label for log lines.
+ * @param maxTries   Maximum attempts. Defaults to 3.
+ * @param userAgent  Overrides the default UA where a server demands it (e.g.
+ *                   Yahoo Finance). Defaults to nullptr (use the built-in UA).
+ * @return true if @p consume reported success on an HTTP 200 response, else false.
+ */
 static bool httpStream(const char* url, StreamConsumer consume, void* ctx,
                        const char* who, int maxTries = 3,
                        const char* userAgent = nullptr) {
@@ -279,6 +313,21 @@ static bool httpStream(const char* url, StreamConsumer consume, void* ctx,
 // a 200 KB response costs the same as a 2 KB one.
 typedef void (*TagHandler)(const char* tagBody, void* ctx);
 
+/**
+ * @brief Sliding-window scanner that delivers each XML element's attribute text.
+ *
+ * Finds every occurrence of @p open (e.g. "<receptionReport ") in the stream and
+ * passes that element's attributes to @p onTag. Memory use is fixed at @p tagCap
+ * regardless of body size.
+ * @param http       Active HTTPClient with a live response.
+ * @param open       Opening-tag prefix to match.
+ * @param onTag      Callback invoked with each matched element's attribute text.
+ * @param ctx        Opaque context pointer passed to @p onTag.
+ * @param tagBuf     Scratch buffer for the current tag's attributes.
+ * @param tagCap     Size of @p tagBuf in bytes.
+ * @param timeoutMs  Overall scan timeout. Defaults to 20000.
+ * @return Number of matched elements delivered.
+ */
 static int scanTags(HTTPClient& http, const char* open, TagHandler onTag,
                     void* ctx, char* tagBuf, size_t tagCap,
                     uint32_t timeoutMs = 20000) {
@@ -346,6 +395,22 @@ static int scanTags(HTTPClient& http, const char* open, TagHandler onTag,
 // truncated, still delivered, and still counted).
 typedef void (*BlockHandler)(const char* block, void* ctx);
 
+/**
+ * @brief Sliding-window scanner that delivers each whole XML element (with text).
+ *
+ * Where scanTags() yields attributes, this yields the full element including
+ * inner text ("<spot>...</spot>"), so xmlGet()-style parsers can run on one
+ * small bounded block. Memory use is fixed at @p blockCap regardless of size.
+ * @param http       Active HTTPClient with a live response.
+ * @param open       Opening tag to match (replayed into the buffer).
+ * @param close      Closing tag that ends each block.
+ * @param onBlock    Callback given a NUL-terminated copy of each element.
+ * @param ctx        Opaque context pointer passed to @p onBlock.
+ * @param buf        Scratch buffer for the current block.
+ * @param blockCap   Size of @p buf; over-long blocks are truncated but delivered.
+ * @param timeoutMs  Overall scan timeout. Defaults to 20000.
+ * @return Number of complete blocks seen.
+ */
 static int scanBlocks(HTTPClient& http, const char* open, const char* close,
                       BlockHandler onBlock, void* ctx,
                       char* buf, size_t blockCap, uint32_t timeoutMs = 20000) {
@@ -412,6 +477,12 @@ static int scanBlocks(HTTPClient& http, const char* open, const char* close,
 // there is no incremental String growth and no silent truncation on OOM.
 struct TextSink { char* buf; size_t cap; size_t len; };
 
+/**
+ * @brief StreamConsumer that reads a whole (small) body into a TextSink buffer.
+ * @param http  Active HTTPClient with a live response.
+ * @param ctx   Pointer to a TextSink describing the destination buffer.
+ * @return true if at least one byte was read, false otherwise.
+ */
 static bool textConsume(HTTPClient& http, void* ctx) {
     TextSink& t = *(TextSink*)ctx;
     WiFiClient* s = http.getStreamPtr();
@@ -434,7 +505,15 @@ static bool textConsume(HTTPClient& http, void* ctx) {
     return t.len > 0;
 }
 
-// Fetch a whole (small) body into buf.  Returns bytes read, 0 on failure.
+/**
+ * @brief Fetch a whole (small) response body into a caller-owned buffer.
+ * @param url       Target URL.
+ * @param buf       Destination buffer (NUL-terminated on return).
+ * @param cap       Size of @p buf in bytes.
+ * @param who       Short label for log lines.
+ * @param maxTries  Maximum attempts. Defaults to 3.
+ * @return Bytes read, or 0 on failure.
+ */
 static size_t httpFetchText(const char* url, char* buf, size_t cap,
                             const char* who, int maxTries = 3) {
     TextSink t = { buf, cap, 0 };
@@ -445,6 +524,15 @@ static size_t httpFetchText(const char* url, char* buf, size_t cap,
 
 
 // ─── HTTP GET (binary) ────────────────────────────────────────────────────────
+/**
+ * @brief GET a binary resource (e.g. a JPEG thumbnail) into a fixed buffer.
+ * @param url        Target URL (http:// or https://).
+ * @param buf        Destination buffer.
+ * @param maxLen     Maximum bytes to read.
+ * @param maxTries   Maximum attempts. Defaults to 3.
+ * @param timeoutMs  Per-attempt read timeout. Defaults to 15000.
+ * @return Bytes read, or 0 on failure.
+ */
 static size_t httpGetBytes(const char* url, uint8_t* buf, size_t maxLen,
                            int maxTries = 3, unsigned long timeoutMs = 15000) {
     for (int attempt = 1; attempt <= maxTries; attempt++) {
@@ -506,6 +594,12 @@ static size_t httpGetBytes(const char* url, uint8_t* buf, size_t maxLen,
 }
 
 // ─── XML helpers ─────────────────────────────────────────────────────────────
+/**
+ * @brief Extract the inner text of the first <tag>...</tag> element.
+ * @param xml  XML/RSS text to search.
+ * @param tag  Element name (without angle brackets).
+ * @return The element's inner text, or "" if the tag is not found.
+ */
 static String xmlGet(const String& xml, const char* tag) {
     String open  = String('<') + tag + '>';
     String close = String("</") + tag + '>';
@@ -516,6 +610,12 @@ static String xmlGet(const String& xml, const char* tag) {
     return (e < 0) ? "" : xml.substring(s, e);
 }
 
+/**
+ * @brief Extract a double-quoted attribute value from an opening tag string.
+ * @param tag   The tag text to search (e.g. `<enclosure url="..." />`).
+ * @param attr  Attribute name (without the `="`).
+ * @return The attribute value, or "" if the attribute is not present.
+ */
 static String xmlAttr(const String& tag, const char* attr) {
     String needle = String(attr) + "=\"";
     int s = tag.indexOf(needle);
@@ -525,7 +625,13 @@ static String xmlAttr(const String& tag, const char* attr) {
     return (e < 0) ? "" : tag.substring(s, e);
 }
 
-// band is the exact name= attribute value, e.g. "80m-40m"
+/**
+ * @brief Extract a <band> element's value matching both name= and time= attrs.
+ * @param xml   Solar-conditions XML.
+ * @param band  Exact name= attribute value (e.g. "80m-40m").
+ * @param time  Exact time= attribute value (e.g. "day" or "night").
+ * @return The matching band's condition text, or "" if not found.
+ */
 static String xmlGetBand(const String& xml, const char* band, const char* time) {
     String nameAttr = String("name=\"") + band + '"';
     String timeAttr = String("time=\"") + time + '"';
@@ -543,65 +649,166 @@ static String xmlGetBand(const String& xml, const char* band, const char* time) 
     return "";
 }
 
-// ─── HTML entity decoder ──────────────────────────────────────────────────────
-// Maps both named (&amp;) and numeric (&#36; / &#x24;) entities to ASCII.
-// Non-ASCII codepoints are mapped to the nearest printable ASCII equivalent.
+// Codepoints the extended DejaVu fonts (src/fonts/dejavu_ext.cpp) contain: ASCII,
+// Latin-1, the General-Punctuation block (dashes, curly quotes, bullet, ellipsis)
+// and the Euro sign. These render as real glyphs; anything else must be folded.
+/**
+ * @brief Whether the extended DejaVu fonts contain a glyph for a codepoint.
+ * @param cp  Unicode codepoint.
+ * @return true for ASCII, Latin-1, the covered General-Punctuation range, and
+ *         the Euro sign; false for everything else (which must be folded).
+ */
+static bool fontHasGlyph(uint32_t cp) {
+    return (cp >= 0x20   && cp <= 0x7E)
+        || (cp >= 0xA0   && cp <= 0xFF)
+        || (cp >= 0x2013 && cp <= 0x2026)
+        || (cp == 0x20AC);
+}
+
+// ─── Unicode → ASCII fold ─────────────────────────────────────────────────────
+// For codepoints the fonts DON'T contain, map to a printable-ASCII equivalent
+// (which may be several chars, or "" to drop it). Covered codepoints are handled
+// by appendCodepoint() and never reach here.
+/**
+ * @brief Fold a codepoint the fonts lack down to a printable-ASCII equivalent.
+ *
+ * Covered codepoints are handled by appendCodepoint() and never reach here.
+ * @param cp  Unicode codepoint.
+ * @return A static ASCII replacement (may be several chars, "" to drop it, or
+ *         "?" for an unmapped codepoint).
+ */
+static const char* foldCodepoint(uint32_t cp) {
+    if (cp <= 0x1F)                return "";  // C0 controls
+    if (cp >= 0x7F && cp <= 0x9F)  return "";  // C1 controls
+    switch (cp) {
+        case 0x2007: case 0x2009: case 0x200A: case 0x202F: return " ";  // spaces
+        case 0x200B: case 0x200C: case 0x200D: case 0xFEFF: return "";   // zero-width
+        case 0x2010: case 0x2011: case 0x2012: case 0x2212: return "-";  // hyphens / minus
+        case 0x2032: case 0x02BC: return "'";                 // primes
+        case 0x2033: return "\"";
+        case 0x2027: case 0x2219: return "*";                 // other bullets
+        case 0x2122: return "(TM)";                           // ™
+        case 0x0152: return "OE"; case 0x0153: return "oe";
+        case 0x0160: return "S";  case 0x0161: return "s";
+        case 0x017D: return "Z";  case 0x017E: return "z";
+        case 0x0178: return "Y";
+    }
+    return "?";
+}
+
+/**
+ * @brief Append a codepoint to a String as UTF-8 (up to 3 bytes / whole BMP).
+ * @param out  Destination String, appended in place.
+ * @param cp   Unicode codepoint to encode.
+ */
+static void appendUtf8(String& out, uint32_t cp) {
+    if (cp < 0x80) {
+        out += (char)cp;
+    } else if (cp < 0x800) {
+        out += (char)(0xC0 | (cp >> 6));
+        out += (char)(0x80 | (cp & 0x3F));
+    } else {
+        out += (char)(0xE0 | (cp >> 12));
+        out += (char)(0x80 | ((cp >> 6) & 0x3F));
+        out += (char)(0x80 | (cp & 0x3F));
+    }
+}
+
+/**
+ * @brief Append a codepoint as bytes the display can render.
+ *
+ * Glyphs the font has pass through as UTF-8 (LovyanGFX maps them back);
+ * everything else is folded to an ASCII approximation via foldCodepoint().
+ * @param out  Destination String, appended in place.
+ * @param cp   Unicode codepoint.
+ */
+static void appendCodepoint(String& out, uint32_t cp) {
+    if (cp >= 0x20 && cp <= 0x7E) { out += (char)cp; return; }
+    if (fontHasGlyph(cp)) { appendUtf8(out, cp); return; }
+    out += foldCodepoint(cp);
+}
+
+// ─── HTML entity + UTF-8 normaliser ───────────────────────────────────────────
+// Rewrites named (&amp;) and numeric (&#36; / &#x24;) HTML entities to their
+// characters, and folds any codepoint the fonts can't render down to ASCII.
+// ASCII and Latin-1 (incl. £ and accented letters) survive; higher Unicode
+// (curly quotes, dashes, ellipsis, emoji) becomes an ASCII approximation or '?'.
+/**
+ * @brief Decode HTML entities and normalise text for the display fonts.
+ *
+ * Rewrites named (&amp;) and numeric (&#36; / &#x24;) entities to their
+ * characters and folds any codepoint the fonts can't render to ASCII. ASCII and
+ * Latin-1 (incl. £ and accents) survive; higher Unicode becomes an ASCII
+ * approximation or '?'.
+ * @param s  Raw text (UTF-8 with possible HTML entities).
+ * @return The decoded, font-safe text.
+ */
 static String decodeHtmlEntities(const String& s) {
     String out;
     out.reserve(s.length());
     int i = 0, n = (int)s.length();
     while (i < n) {
-        if (s[i] != '&') { out += s[i++]; continue; }
+        uint8_t b = (uint8_t)s[i];
+
+        // Raw UTF-8: any byte with the high bit set starts a multi-byte sequence
+        if (b >= 0x80) {
+            uint32_t cp; int len;
+            if      ((b & 0xE0) == 0xC0) { cp = b & 0x1F; len = 2; }
+            else if ((b & 0xF0) == 0xE0) { cp = b & 0x0F; len = 3; }
+            else if ((b & 0xF8) == 0xF0) { cp = b & 0x07; len = 4; }
+            else { i++; continue; }                    // stray continuation byte
+            if (i + len > n) { i++; continue; }         // truncated sequence
+            bool ok = true;
+            for (int k = 1; k < len; k++) {
+                uint8_t bc = (uint8_t)s[i + k];
+                if ((bc & 0xC0) != 0x80) { ok = false; break; }
+                cp = (cp << 6) | (bc & 0x3F);
+            }
+            if (!ok) { i++; continue; }
+            appendCodepoint(out, cp);
+            i += len;
+            continue;
+        }
+
+        if (b != '&') { out += (char)b; i++; continue; }
+
+        // HTML entity
         int semi = s.indexOf(';', i + 1);
         if (semi < 0 || semi - i > 12) { out += s[i++]; continue; }
         String ent = s.substring(i + 1, semi);
-        char rep = 0;
-        if      (ent.equalsIgnoreCase("amp"))   rep = '&';
-        else if (ent.equalsIgnoreCase("lt"))    rep = '<';
-        else if (ent.equalsIgnoreCase("gt"))    rep = '>';
-        else if (ent.equalsIgnoreCase("quot"))  rep = '"';
-        else if (ent.equalsIgnoreCase("apos"))  rep = '\'';
-        else if (ent.equalsIgnoreCase("nbsp"))  rep = ' ';
-        else if (ent.equalsIgnoreCase("pound")) rep = 'L';   // £
-        else if (ent.startsWith("#x") || ent.startsWith("#X")) {
-            long code = strtol(ent.c_str() + 2, nullptr, 16);
-            if      (code >= 0x20 && code <= 0x7E) rep = (char)code;
-            else if (code == 0xA0)                  rep = ' ';
-            else if (code == 0xA3)                  rep = 'L';  // £
-            else if (code == 0x2013 || code == 0x2014) rep = '-';
-            else if (code == 0x2018 || code == 0x2019) rep = '\'';
-            else if (code == 0x201C || code == 0x201D) rep = '"';
-            else if (code == 0x2026)                rep = '.';
-            else if (code == 0x2022)                rep = '*';
-            else                                    rep = '?';
-        } else if (ent.startsWith("#")) {
-            long code = ent.substring(1).toInt();
-            if      (code >= 32 && code <= 126)     rep = (char)code;
-            else if (code == 160)                   rep = ' ';
-            else if (code == 163)                   rep = 'L';  // £
-            else if (code == 8211 || code == 8212)  rep = '-';
-            else if (code == 8216 || code == 8217)  rep = '\'';
-            else if (code == 8220 || code == 8221)  rep = '"';
-            else if (code == 8230)                  rep = '.';
-            else if (code == 8226)                  rep = '*';
-            else                                    rep = '?';
-        }
-        if (rep) { out += rep; i = semi + 1; }
-        else     { out += s[i++]; }   // unknown entity — keep the '&'
+        bool handled = true;
+        if      (ent.equalsIgnoreCase("amp"))   out += '&';
+        else if (ent.equalsIgnoreCase("lt"))    out += '<';
+        else if (ent.equalsIgnoreCase("gt"))    out += '>';
+        else if (ent.equalsIgnoreCase("quot"))  out += '"';
+        else if (ent.equalsIgnoreCase("apos"))  out += '\'';
+        else if (ent.equalsIgnoreCase("nbsp"))  appendCodepoint(out, 0x00A0);
+        else if (ent.equalsIgnoreCase("pound")) appendCodepoint(out, 0x00A3);
+        else if (ent.startsWith("#x") || ent.startsWith("#X"))
+            appendCodepoint(out, (uint32_t)strtol(ent.c_str() + 2, nullptr, 16));
+        else if (ent.startsWith("#"))
+            appendCodepoint(out, (uint32_t)strtol(ent.c_str() + 1, nullptr, 10));
+        else handled = false;
+
+        if (handled) i = semi + 1;
+        else         out += s[i++];   // unknown entity — keep the '&'
     }
     return out;
 }
 
 // ─── Day abbreviation ─────────────────────────────────────────────────────────
+/** @brief Map a weekday index to its 3-letter abbreviation.
+ *  @param wday  Day of week, 0=Sunday (taken modulo 7).
+ *  @return A static string ("Sun".."Sat"). */
 static const char* dayAbbr(int wday) {
     static const char* D[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
     return D[wday % 7];
 }
 
 // ─── WEATHER ─────────────────────────────────────────────────────────────────
-// open-meteo uses HTTP/1.1 chunked transfer encoding.
-// getStreamPtr() returns raw bytes including chunk-size headers ("3a4\r\n…").
-// http.getString() de-chunks automatically — use that instead.
+/** @brief Fetch current weather + 7-day forecast from Open-Meteo into g_weather
+ *         (see fetch.h). Always fetched in °C/mph; unit conversion happens at
+ *         display time. Uses getString() to de-chunk the response. */
 void fetchWeather() {
     g_fetchState[FSRC_WEATHER] = FS_ACTIVE;
     char url[420];
@@ -703,6 +910,11 @@ void fetchWeather() {
         wd.lightningPct   = (total > 0) ? (uint8_t)(thunder * 100 / total) : 0;
     }
 
+#if FORCE_LIGHTNING
+    wd.lightningHours = 0;    // TEST: pretend thunder is imminent
+    wd.lightningPct   = 99;
+#endif
+
     xSemaphoreTake(g_dataMutex, portMAX_DELAY);
     g_weather = wd;
     xSemaphoreGive(g_dataMutex);
@@ -714,6 +926,8 @@ void fetchWeather() {
 }
 
 // ─── SOLAR ────────────────────────────────────────────────────────────────────
+/** @brief Fetch HF solar/geomagnetic indices and band conditions from hamqsl
+ *         into g_solar (see fetch.h). */
 void fetchSolar() {
     g_fetchState[FSRC_SOLAR] = FS_ACTIVE;
     // hamqsl solarxml.php is ~3 KB.  One bounded allocation, parsed in place,
@@ -778,9 +992,12 @@ void fetchSolar() {
 
 // ─── RSS PARSER ───────────────────────────────────────────────────────────────
 
-// Find the real </item> end, correctly skipping any </item> that appears
-// inside a CDATA section (e.g. inside <description><![CDATA[...]]></description>).
-// itemStart points to '<' of "<item>" or "<item ...>".
+/**
+ * @brief Find the real end of an RSS <item>, skipping CDATA-embedded </item>.
+ * @param body       Full RSS body.
+ * @param itemStart  Index of the '<' of the opening "<item>"/"<item ...>" tag.
+ * @return Index of the matching "</item>" (its '<'), or -1 if none before EOF.
+ */
 static int findItemEnd(const String& body, int itemStart) {
     // Skip to the end of the opening tag (could be "<item>" or "<item rdf:about=...>")
     int tagClose = body.indexOf('>', itemStart);
@@ -797,6 +1014,15 @@ static int findItemEnd(const String& body, int itemStart) {
     }
 }
 
+/**
+ * @brief Parse an RSS body into NewsData, extracting titles and thumbnail URLs.
+ *
+ * Handles CDATA, decodes HTML entities in titles, and resolves a thumbnail from
+ * media:thumbnail, enclosure, or an embedded <img> (in that order).
+ * @param body      Full RSS body (may be truncated mid-item).
+ * @param[out] nd   Destination NewsData (count/valid/items populated).
+ * @param maxItems  Maximum items to extract.
+ */
 static void parseRSS(const String& body, NewsData& nd, int maxItems) {
     nd.count = 0;
     nd.valid = true;
@@ -918,6 +1144,17 @@ static void parseRSS(const String& body, NewsData& nd, int maxItems) {
     }
 }
 
+/**
+ * @brief Download a thumbnail image and publish it to a shared buffer atomically.
+ *
+ * Fetches into a private temp buffer (falling back from HTTPS to HTTP once),
+ * then swaps it into @p buf under g_dataMutex and bumps @p version so the draw
+ * task re-decodes. A truncated image is discarded (old thumbnail kept).
+ * @param thumbUrl      Image URL; a null/empty URL clears @p len to 0.
+ * @param buf           Shared destination buffer (THUMB_BUF_LEN bytes).
+ * @param[in,out] len   Receives the new byte count (0 if nothing was published).
+ * @param[in,out] version  Bumped when a new image is published.
+ */
 static void fetchThumb(const char* thumbUrl, uint8_t* buf, size_t& len, uint32_t& version) {
     if (!thumbUrl || thumbUrl[0] == '\0' || !buf) { len = 0; return; }
 
@@ -949,9 +1186,12 @@ static void fetchThumb(const char* thumbUrl, uint8_t* buf, size_t& len, uint32_t
 
 // ─── RSS streaming helpers ────────────────────────────────────────────────────
 //
-// Scan stream for the next <item> or <item attr...> opening tag.
-// Consumes and discards everything up to and including the tag opener.
-// Returns true if found before deadline / disconnect.
+/**
+ * @brief Advance a stream to just past the next "<item" opening tag.
+ * @param s         Live response stream.
+ * @param deadline  Absolute millis() deadline.
+ * @return true if an item opener was found before the deadline/disconnect.
+ */
 static bool streamSkipToItem(WiFiClient* s, uint32_t deadline) {
     const char NEEDLE[] = "<item";
     const int  NLEN = 5;
@@ -980,11 +1220,17 @@ static bool streamSkipToItem(WiFiClient* s, uint32_t deadline) {
     return false;
 }
 
-// Read the body of one RSS item (from just after the opening <item...> tag)
-// into buf[0..bufLen-1], searching for the </item> closing tag.
-// Prepends "<item>" so that parseRSS can locate the opening tag.
-// On buffer overflow: continues draining the stream until </item> is found.
-// Returns bytes written to buf (>= PLEN if any content), or -1 on timeout.
+/**
+ * @brief Read one RSS item's body into a buffer, up to its </item>.
+ *
+ * Prepends "<item>" so parseRSS can find the opening tag. On overflow it keeps
+ * draining the stream until </item> so the next item still aligns.
+ * @param s         Live response stream (positioned just past "<item...>").
+ * @param buf       Destination buffer.
+ * @param bufLen    Size of @p buf in bytes.
+ * @param deadline  Absolute millis() deadline.
+ * @return Bytes written to @p buf (>= 6), or -1 on timeout/disconnect.
+ */
 static int streamReadItem(WiFiClient* s, char* buf, int bufLen, uint32_t deadline) {
     const char PREFIX[] = "<item>";
     const int  PLEN = 6;
@@ -1042,6 +1288,12 @@ struct RSSCtx { NewsData* nd; int maxItems; };
 // The RSS reader already consumed one <item> at a time off the socket; this
 // keeps that loop verbatim and only replaces the hand-rolled SSL choreography
 // around it with httpStream().
+/**
+ * @brief StreamConsumer that parses an RSS feed item-by-item into NewsData.
+ * @param http  Active HTTPClient with a live response.
+ * @param ctx   Pointer to an RSSCtx (destination NewsData + max item count).
+ * @return true if at least one item was parsed (0 items => httpStream retries).
+ */
 static bool rssConsume(HTTPClient& http, void* ctx) {
     RSSCtx&   c  = *(RSSCtx*)ctx;
     NewsData& nd = *c.nd;
@@ -1070,6 +1322,14 @@ static bool rssConsume(HTTPClient& http, void* ctx) {
     return nd.count > 0;   // zero items => httpStream retries
 }
 
+/**
+ * @brief Fetch and parse an RSS feed into NewsData (shared by BBC/Apple).
+ * @param url       Feed URL.
+ * @param tag       Short label for log lines.
+ * @param[out] nd   Destination NewsData.
+ * @param maxItems  Maximum items to keep.
+ * @return true if at least one item was parsed.
+ */
 static bool fetchRSSNews(const char* url, const char* tag,
                          NewsData& nd, int maxItems) {
     nd.count = 0;
@@ -1082,6 +1342,7 @@ static bool fetchRSSNews(const char* url, const char* tag,
     return nd.count > 0;
 }
 
+/** @brief Fetch the BBC News RSS feed + hero thumbnail into g_bbcNews (see fetch.h). */
 void fetchBBCNews() {
     g_fetchState[FSRC_BBC] = FS_ACTIVE;
     NewsData nd;
@@ -1093,6 +1354,9 @@ void fetchBBCNews() {
     fetchThumb(nd.items[0].thumbUrl, g_bbcThumbBuf, g_bbcThumbLen, g_bbcThumbVersion);
 }
 
+/** @brief Fetch the Apple/Mac News RSS feed + hero thumbnail into g_appleNews
+ *         (see fetch.h). Routes the hero image through a resize proxy to fit the
+ *         thumbnail buffer. */
 void fetchAppleNews() {
     g_fetchState[FSRC_APPLE] = FS_ACTIVE;
     NewsData nd;
@@ -1129,6 +1393,15 @@ void fetchAppleNews() {
 // previous implementation apart from losing its hand-rolled SSL block.
 struct TrackerCtx { float* closes; int closeCount; size_t total; };
 
+/**
+ * @brief StreamConsumer that scrapes the "close" price array from Yahoo's chart JSON.
+ *
+ * Scans byte-by-byte for the `"close":[` array so the large payload is never
+ * buffered; collects up to TRACKER_POINTS values > 100.
+ * @param http  Active HTTPClient with a live response.
+ * @param ctx   Pointer to a TrackerCtx (destination array + counters).
+ * @return true if at least one close value was captured.
+ */
 static bool trackerConsume(HTTPClient& http, void* ctx) {
     TrackerCtx& st = *(TrackerCtx*)ctx;
     WiFiClient* stream = http.getStreamPtr();
@@ -1186,6 +1459,8 @@ static bool trackerConsume(HTTPClient& http, void* ctx) {
     return st.closeCount > 0;
 }
 
+/** @brief Fetch the configured stock symbol's weekly price history from Yahoo
+ *         Finance into g_tracker (see fetch.h). */
 void fetchTracker() {
     char trackerUrl[128];
     snprintf(trackerUrl, sizeof(trackerUrl),
@@ -1304,7 +1579,15 @@ static const PfxEntry PFX_LOC[] = {
 };
 static const int PFX_N = (int)(sizeof(PFX_LOC) / sizeof(PFX_LOC[0]));
 
-// Longest-match prefix lookup: tries lengths 3, 2, 1 in order.
+/**
+ * @brief Estimate a station's location from its callsign prefix (DXCC table).
+ *
+ * Strips any "/suffix" then tries prefix lengths 3, 2, 1 in order (longest match).
+ * @param call      Callsign string.
+ * @param[out] lat  Receives the entity's approximate latitude in degrees.
+ * @param[out] lon  Receives the entity's approximate longitude in degrees.
+ * @return true if the prefix was matched (out-params set), false otherwise.
+ */
 static bool pfxToLatLon(const char* call, float& lat, float& lon) {
     char base[12];
     strlcpy(base, call, sizeof(base));
@@ -1326,7 +1609,12 @@ static bool pfxToLatLon(const char* call, float& lat, float& lon) {
     return false;
 }
 
-// Haversine great-circle distance in km.
+/**
+ * @brief Great-circle distance between two lat/lon points (haversine).
+ * @param la1,lo1  First point's latitude/longitude in degrees.
+ * @param la2,lo2  Second point's latitude/longitude in degrees.
+ * @return Distance in kilometres.
+ */
 static float gcKm(float la1, float lo1, float la2, float lo2) {
     const float R   = 6371.0f;
     const float D2R = (float)M_PI / 180.0f;
@@ -1338,7 +1626,12 @@ static float gcKm(float la1, float lo1, float la2, float lo2) {
     return R * 2.0f * atan2f(sqrtf(a), sqrtf(1.0f - a));
 }
 
-// Initial bearing from (la1,lo1) toward (la2,lo2), degrees 0–360.
+/**
+ * @brief Initial great-circle bearing from one point toward another.
+ * @param la1,lo1  Start latitude/longitude in degrees.
+ * @param la2,lo2  Destination latitude/longitude in degrees.
+ * @return Initial bearing in degrees (0–360, 0 = north).
+ */
 static float gcBearing(float la1, float lo1, float la2, float lo2) {
     const float D2R = (float)M_PI / 180.0f;
     float dlon = (lo2 - lo1) * D2R;
@@ -1355,9 +1648,15 @@ static float gcBearing(float la1, float lo1, float la2, float lo2) {
 struct DXCand { DXSpot spot; float dist; };
 static DXCand cands[50];
 
-// One <spot>...</spot> element, handed over as it arrives off the wire.
-// Body is unchanged from the old whole-body loop; only the source of `block`
-// differs, so the parsing behaviour is identical.
+/**
+ * @brief BlockHandler for one DX-cluster <spot> element.
+ *
+ * Parses the spot, derives spotter/DX locations from the prefix table, and adds
+ * it to the candidate pool — deduplicating by spotted callsign (keeping the
+ * closer spotter).
+ * @param blockStr  NUL-terminated "<spot>...</spot>" element text.
+ * @param ctx       Pointer to the running candidate count (int*).
+ */
 static void dxOnBlock(const char* blockStr, void* ctx) {
     int& nc = *(int*)ctx;
     if (nc >= 50) return;
@@ -1444,6 +1743,9 @@ static void dxOnBlock(const char* blockStr, void* ctx) {
     nc++;
 }
 
+/** @brief StreamConsumer that scans DX-cluster XML for <spot> elements.
+ *  @param http  Active HTTPClient. @param ctx  Pointer to the candidate count.
+ *  @return true if at least one spot was parsed. */
 static bool dxConsume(HTTPClient& http, void* ctx) {
     char blockBuf[512];          // one <spot> element; DX comments are short
     int n = scanBlocks(http, "<spot", "</spot>", dxOnBlock, ctx,
@@ -1452,6 +1754,8 @@ static bool dxConsume(HTTPClient& http, void* ctx) {
     return n > 0;
 }
 
+/** @brief Fetch recent DX-cluster spots into g_dxSpots, sorted by distance from
+ *         the QTH to the spotter (nearest first). See fetch.h. */
 void fetchDXSpots() {
     g_fetchState[FSRC_DX] = FS_ACTIVE;
     int nc = 0;
@@ -1496,8 +1800,10 @@ void fetchDXSpots() {
 //   Orbital period  = 5561 s  (~92.7 min)
 //   Earth rotation  = 360° / 86400 s
 //
-// Two consecutive lat readings determine ascending/descending so the correct
-// quadrant of the argument-of-latitude u₀ can be selected.
+/** @brief Fetch the current ISS position from open-notify, then analytically
+ *         compute its upcoming ground track and the next visible pass into g_iss
+ *         (see fetch.h). Uses two consecutive readings to resolve ascending vs
+ *         descending. */
 void fetchISS() {
     g_fetchState[FSRC_ISS] = FS_ACTIVE;
     // ~200-byte response — a fixed stack buffer beats any streaming parser.
@@ -1712,6 +2018,15 @@ void fetchISS() {
 // keeps only the seven fields actually used, so the document stays a few KB and
 // no whole-body buffer ever exists.  This is what the old 24576-byte String was
 // for — and what silently truncated into "IncompleteInput" when it could not grow.
+/**
+ * @brief StreamConsumer that parses the SOTA spots JSON (with a field filter).
+ *
+ * Deserialises directly from the stream keeping only the seven used fields, so
+ * no whole-body buffer is needed.
+ * @param http  Active HTTPClient with a live response.
+ * @param ctx   Pointer to the destination JsonDocument.
+ * @return true on successful parse, false on a JSON error.
+ */
 static bool sotaConsume(HTTPClient& http, void* ctx) {
     JsonDocument& doc = *(JsonDocument*)ctx;
 
@@ -1731,6 +2046,8 @@ static bool sotaConsume(HTTPClient& http, void* ctx) {
     return true;
 }
 
+/** @brief Fetch recent SOTA activator spots into g_sotaSpots, sorted by distance
+ *         from the QTH (nearest first). See fetch.h. */
 void fetchSOTASpots() {
     g_fetchState[FSRC_SOTA] = FS_ACTIVE;
 
@@ -1869,9 +2186,16 @@ void fetchSOTASpots() {
 // we need, then immediately processes and discards it.  Peak extra allocation
 // is ~2 KB regardless of response size (was 40+ KB with ArduinoJson).
 
-// Read the next `{…}` object from a stream into buf.
-// Returns object length (>0), 0 at end of array (']' seen), or -1 on timeout.
-// Objects larger than bufLen-1 are consumed but return -2 (caller should skip).
+/**
+ * @brief Read the next JSON `{...}` object from a stream into a buffer.
+ *
+ * Tracks brace depth and string escaping so nested braces don't end it early.
+ * @param s       Live response stream.
+ * @param buf     Destination buffer (NUL-terminated on a complete object).
+ * @param bufLen  Size of @p buf in bytes.
+ * @return Object length (>0); 0 at the end of the top-level array (']' seen);
+ *         -1 on timeout; -2 if the object overflowed @p buf (caller should skip).
+ */
 static int potaReadObj(WiFiClient* s, char* buf, int bufLen) {
     int  depth = 0, len = 0;
     bool inStr = false, esc = false, started = false, overflow = false;
@@ -1899,8 +2223,15 @@ static int potaReadObj(WiFiClient* s, char* buf, int bufLen) {
     return -1;  // timeout
 }
 
-// Extract the value for `key` from a flat JSON object string into out[outLen].
-// Handles both quoted strings and unquoted scalars (numbers, null, bool).
+/**
+ * @brief Extract a field's value from a flat JSON object string.
+ *
+ * Handles quoted strings and unquoted scalars; a literal "null" yields "".
+ * @param obj         NUL-terminated JSON object text.
+ * @param key         Field name to look up.
+ * @param[out] out    Destination buffer (empty string if the key is absent).
+ * @param outLen      Size of @p out in bytes.
+ */
 static void potaGetField(const char* obj, const char* key, char* out, int outLen) {
     char pat[40];
     snprintf(pat, sizeof(pat), "\"%s\"", key);
@@ -1937,6 +2268,15 @@ struct POTACtx  { int nc; bool streamOk; };
 
 // POTA already parsed one JSON object at a time; this keeps that loop verbatim
 // and only replaces the hand-rolled SSL choreography around it with httpStream.
+/**
+ * @brief StreamConsumer that parses the POTA spots JSON one object at a time.
+ *
+ * Uses lat/lon from each object directly for distance, deduplicating by
+ * activator (keeping the closest).
+ * @param http  Active HTTPClient with a live response.
+ * @param ctx   Pointer to a POTACtx (candidate count + clean-EOF flag).
+ * @return true if the array was consumed to its closing ']'.
+ */
 static bool potaConsume(HTTPClient& http, void* ctx) {
     POTACtx& st = *(POTACtx*)ctx;
     static char objBuf[2048];
@@ -2004,6 +2344,8 @@ static bool potaConsume(HTTPClient& http, void* ctx) {
     return st.streamOk || st.nc > 0;
 }
 
+/** @brief Fetch recent POTA activator spots into g_potaSpots, sorted by distance
+ *         from the QTH (nearest first). See fetch.h. */
 void fetchPOTASpots() {
     g_fetchState[FSRC_POTA] = FS_ACTIVE;
 
@@ -2046,6 +2388,9 @@ void fetchPOTASpots() {
 // or upcoming (not started), discard those that have already ended, and store
 // active ones first followed by upcoming in chronological order.
 
+/** @brief Parse a leading 3-letter English month name.
+ *  @param s  String beginning with a month abbreviation (e.g. "May 26").
+ *  @return Month number 1–12, or -1 if unrecognised. */
 static int cxMonthNum(const String& s) {
     const char* mo[12] = {"Jan","Feb","Mar","Apr","May","Jun",
                           "Jul","Aug","Sep","Oct","Nov","Dec"};
@@ -2053,7 +2398,12 @@ static int cxMonthNum(const String& s) {
     return -1;
 }
 
-// Self-contained UTC epoch — avoids platform timezone dependencies.
+/**
+ * @brief Convert a UTC calendar date/time to a Unix epoch (timezone-independent).
+ * @param year,mo,dy  Year, month (1–12), day (1–31).
+ * @param hh,mm       Hour (0–23) and minute (0–59).
+ * @return Seconds since the Unix epoch.
+ */
 static time_t cxUtcEpoch(int year, int mo, int dy, int hh, int mm) {
     static const int mdays[12] = {31,28,31,30,31,30,31,31,30,31,30,31};
     long days = (long)(year - 1970) * 365L;
@@ -2068,7 +2418,14 @@ static time_t cxUtcEpoch(int year, int mo, int dy, int hh, int mm) {
     return (time_t)(days * 86400L + hh * 3600L + mm * 60L);
 }
 
-// Parse "HHMM" at position pos in s.  Returns true and sets h/m on success.
+/**
+ * @brief Parse a "HHMM" time at a given offset.
+ * @param s        Source string.
+ * @param pos      Offset of the first digit.
+ * @param[out] h   Receives the hour.
+ * @param[out] m   Receives the minute.
+ * @return true if a valid 24-hour time was parsed.
+ */
 static bool cxParseHHMM(const String& s, int pos, int& h, int& m) {
     if (pos + 4 > (int)s.length()) return false;
     h = (s[pos]-'0')*10 + (s[pos+1]-'0');
@@ -2076,7 +2433,14 @@ static bool cxParseHHMM(const String& s, int pos, int& h, int& m) {
     return (h >= 0 && h <= 23 && m >= 0 && m <= 59);
 }
 
-// Skip over 'Z', ',', ' ' chars starting at pos; then parse "Mon DD".
+/**
+ * @brief Parse a "Mon DD" date, skipping any leading 'Z', ',', or spaces.
+ * @param s           Source string.
+ * @param pos         Offset to start scanning from.
+ * @param[out] month  Receives the month (1–12).
+ * @param[out] day    Receives the day (1–31).
+ * @return true if a valid month/day was parsed.
+ */
 static bool cxParseMonDD(const String& s, int pos, int& month, int& day) {
     while (pos < (int)s.length() &&
            (s[pos]=='Z' || s[pos]==',' || s[pos]==' ')) pos++;
@@ -2089,8 +2453,16 @@ static bool cxParseMonDD(const String& s, int pos, int& month, int& day) {
     return (day >= 1 && day <= 31);
 }
 
-// Parse description string into start/end UTC epoch values.
-// Returns false if the string cannot be parsed.
+/**
+ * @brief Parse a contest description's time range into UTC epoch values.
+ *
+ * Handles same-day ("0100Z-0159Z, May 26") and multi-day ("0000Z, May 30 to
+ * 2359Z, May 31") formats, inferring the year and handling year wrap.
+ * @param desc          Contest <description> time text.
+ * @param[out] tStart   Receives the start epoch.
+ * @param[out] tEnd     Receives the end epoch.
+ * @return true if the range parsed, false otherwise.
+ */
 static bool cxParseTimes(const String& desc, time_t& tStart, time_t& tEnd) {
     tStart = tEnd = 0;
 
@@ -2139,8 +2511,14 @@ struct CxEntry { Contest c; time_t tStart; };
 static CxEntry cxActive[CONTEST_MAX], cxUpcoming[CONTEST_MAX];
 struct CxCtx  { time_t now; int nActive; int nUpcoming; };
 
-// One RSS <item>...</item>, handed over as it arrives.  Body unchanged from the
-// old whole-body loop; only the source of `blk` differs.
+/**
+ * @brief BlockHandler for one contest-calendar RSS <item>.
+ *
+ * Parses the times, discards finished contests, classifies active vs upcoming,
+ * and files the entry into the appropriate bucket.
+ * @param blockStr  NUL-terminated "<item>...</item>" element text.
+ * @param ctx       Pointer to a CxCtx (now-time and per-bucket counters).
+ */
 static void cxOnBlock(const char* blockStr, void* ctx) {
     CxCtx& st = *(CxCtx*)ctx;
     if (st.nActive + st.nUpcoming >= CONTEST_MAX * 2) return;
@@ -2176,6 +2554,9 @@ static void cxOnBlock(const char* blockStr, void* ctx) {
     }
 }
 
+/** @brief StreamConsumer that scans the contest-calendar RSS for <item> elements.
+ *  @param http  Active HTTPClient. @param ctx  Pointer to a CxCtx.
+ *  @return true if at least one item was parsed. */
 static bool cxConsume(HTTPClient& http, void* ctx) {
     char blockBuf[1024];        // one RSS <item>, description included
     int n = scanBlocks(http, "<item>", "</item>", cxOnBlock, ctx,
@@ -2184,6 +2565,8 @@ static bool cxConsume(HTTPClient& http, void* ctx) {
     return n > 0;
 }
 
+/** @brief Fetch active/upcoming contests into g_contests, active first then
+ *         upcoming in chronological order (see fetch.h). */
 void fetchContests() {
     g_fetchState[FSRC_CONTESTS] = FS_ACTIVE;
 
@@ -2224,6 +2607,13 @@ void fetchContests() {
     LOG("[cx] OK  %d active  %d upcoming\n", nActive, min(nUpcoming, CONTEST_MAX - nActive));
 }
 
+/**
+ * @brief Extract a labelled field value from a contest-detail HTML table.
+ * @param html        The detail page HTML.
+ * @param label       Row label to find (e.g. "Mode"); matched as "label:</td><td>".
+ * @param[out] out    Destination buffer (empty if not found); <br> becomes " / ".
+ * @param outLen      Size of @p out in bytes.
+ */
 static void extractTableField(const String& html, const char* label, char* out, int outLen) {
     out[0] = '\0';
     String pat = String(label) + ":</td><td>";
@@ -2241,6 +2631,8 @@ static void extractTableField(const String& html, const char* label, char* out, 
     strlcpy(out, val.c_str(), outLen);
 }
 
+/** @brief Fetch the detail body (mode/bands/exchange) for the contest requested
+ *         via g_contestDetailReq into g_contestDetail (see fetch.h). */
 void fetchContestDetail() {
     int8_t idx = g_contestDetailReq;
     if (idx < 0) return;
@@ -2291,8 +2683,8 @@ void fetchContestDetail() {
 }
 
 // ─── Timezone auto-detect ─────────────────────────────────────────────────────
-// Reuses Open-Meteo's timezone=auto resolver (the same API used for weather)
-// to find the IANA zone name for a lat/lon, then matches it against TZ_LIST.
+/** @brief Resolve the requested lat/lon (g_tzLookupLat/Lon) to a TZ_LIST entry
+ *         via Open-Meteo's timezone=auto resolver, into g_tzLookup (see fetch.h). */
 void fetchTzLookup() {
     if (!g_tzLookupReq) return;
     g_tzLookupReq = false;
@@ -2348,6 +2740,14 @@ void fetchTzLookup() {
 // Fetches who received our callsign in the last 15 minutes from pskreporter.info.
 // XML is streamed into a String (≤32 KB) then parsed tag-by-tag with strstr().
 
+/**
+ * @brief Extract a double-quoted attribute value from a raw tag string.
+ * @param tag         Tag attribute text (leading space expected).
+ * @param attr        Attribute name to find.
+ * @param[out] out    Destination buffer.
+ * @param outLen      Size of @p out in bytes.
+ * @return true if the attribute was found and non-empty.
+ */
 static bool pskGetAttr(const char* tag, const char* attr, char* out, int outLen) {
     char pat[48];
     snprintf(pat, sizeof(pat), " %s=\"", attr);
@@ -2360,8 +2760,14 @@ static bool pskGetAttr(const char* tag, const char* attr, char* out, int outLen)
     return i > 0;
 }
 
-// Per-report handler for the streaming scanner.  Called once per
-// <receptionReport> element as it arrives off the wire.
+/**
+ * @brief TagHandler for one PSK Reporter <receptionReport> element.
+ *
+ * Skips the outer wrapper (no receiverLocator), counts every inner report, and
+ * stores up to PSK_REPORTS_MAX of them (call, grid→lat/lon, frequency, SNR).
+ * @param tag  The element's attribute text.
+ * @param ctx  Pointer to the destination PSKData.
+ */
 static void pskOnTag(const char* tag, void* ctx) {
     PSKData& nd = *(PSKData*)ctx;
 
@@ -2388,12 +2794,17 @@ static void pskOnTag(const char* tag, void* ctx) {
     nd.count++;
 }
 
+/** @brief StreamConsumer that scans PSK Reporter XML for <receptionReport> tags.
+ *  @param http  Active HTTPClient. @param ctx  Pointer to the destination PSKData.
+ *  @return true always (HTTP 200 with zero reports is still valid). */
 static bool pskConsume(HTTPClient& http, void* ctx) {
     char tagBuf[512];
     scanTags(http, "<receptionReport ", pskOnTag, ctx, tagBuf, sizeof(tagBuf));
     return true;   // HTTP 200 with zero reports is still a valid answer
 }
 
+/** @brief Fetch stations that heard the configured callsign in the last 15 min
+ *         from PSK Reporter into g_pskData (see fetch.h). No-op if no callsign. */
 void fetchPSKReporter() {
     if (!g_settings.callsign[0]) return;
 
@@ -2429,8 +2840,14 @@ void fetchPSKReporter() {
 // Queries PSK Reporter by receiver grid square. Each <receptionReport> means a
 // local station heard the sender. We deduplicate by senderCallsign, keeping the
 // highest-SNR instance, so the map shows unique DX stations heard in the area.
-// Per-report handler for the streaming scanner.  Deduplicates by
-// senderCallsign, keeping the highest-SNR instance of each DX station.
+/**
+ * @brief TagHandler for one FT8 <receptionReport> element.
+ *
+ * Requires a sender locator (to place the map dot), counts every report, and
+ * deduplicates by senderCallsign keeping the highest-SNR instance.
+ * @param tag  The element's attribute text.
+ * @param ctx  Pointer to the destination FT8SpotsData.
+ */
 static void ft8OnTag(const char* tag, void* ctx) {
     FT8SpotsData& nd = *(FT8SpotsData*)ctx;
 
@@ -2478,12 +2895,17 @@ static void ft8OnTag(const char* tag, void* ctx) {
     }
 }
 
+/** @brief StreamConsumer that scans FT8 PSK-Reporter XML for <receptionReport> tags.
+ *  @param http  Active HTTPClient. @param ctx  Pointer to the destination FT8SpotsData.
+ *  @return true always (HTTP 200 with zero reports is still valid). */
 static bool ft8Consume(HTTPClient& http, void* ctx) {
     char tagBuf[512];
     scanTags(http, "<receptionReport ", ft8OnTag, ctx, tagBuf, sizeof(tagBuf));
     return true;
 }
 
+/** @brief Fetch FT8 DX stations heard in the configured grid square (first 4
+ *         chars) from PSK Reporter into g_ft8Spots (see fetch.h). No-op if no grid. */
 void fetchFT8Spots() {
     if (!g_settings.grid[0]) return;
 
@@ -2515,13 +2937,12 @@ void fetchFT8Spots() {
 }
 
 // ─── Background fetch task (core 1) ──────────────────────────────────────────
-// News and stocks are fetched FIRST so they appear on screen as soon as
-// possible.  Weather and solar follow.  Each source tracks its own last-fetch
-// time and retries quickly (90 s) if the previous attempt failed.
-//
-// param: SemaphoreHandle_t fetchReady — blocks here until setup() signals that
-//   the SSL reserve blocks are in place (see main.cpp).  This guarantees that
-//   g_sslX509R and g_sslCtxR are held before the first TLS connection.
+/** @brief Background fetch FreeRTOS task entry point (see fetch.h).
+ *
+ * Waits on the one-shot ready semaphore (so the SSL reserves are held before the
+ * first TLS connection), performs the initial boot fetch, then loops refreshing
+ * each source on its own schedule — news/stocks first, with quick (~90 s)
+ * retries after a failure. Never returns. */
 void fetchTask(void* param) {
     // Wait for setup() to free the SSL memory reserves
     if (param) {

@@ -4,6 +4,7 @@
 #include "ui.h"
 #include "config.h"
 #include "data_store.h"
+#include "service.h"
 #include <cstring>
 #include "fonts/ui_fonts.h"
 
@@ -19,6 +20,9 @@ enum SettingsPage : uint8_t {
     PAGE_CALIBRATE,
     PAGE_TZ_DETECT,
     PAGE_BRIGHTNESS,
+    PAGE_ISSFREQ,        // list of the 4 ISS frequencies
+    PAGE_ISSFREQ_EDIT,   // digit-spinner editor for one frequency
+    PAGE_SERVICE,        // screenshot + fake toggles (for documentation)
 };
 
 static SettingsPage g_page        = PAGE_MENU;
@@ -28,12 +32,20 @@ static int          g_scrScroll   = 0;      // screens list first-visible row
 static char         g_editGrid[8];          // working copy for location editor
 static char         g_editCall[14];         // working copy for callsign editor
 static bool         g_tzApplied   = false;  // true once an arrived tz-lookup result has been saved
+static int          g_editFreqSel = 0;      // which ISS frequency is being edited (0-3)
+static uint8_t      g_editDigits[6];         // working digits DDD.DDD for the freq editor
 
 // ─── Timezone display order — alphabetical, decoupled from TZ_LIST's own
 // index order (which TZ_ALIASES and tzFindByIana() depend on staying fixed) ──
 static int  g_tzOrder[TZ_COUNT];
 static bool g_tzOrderReady = false;
 
+/**
+ * @brief Build the alphabetical timezone display order once (lazy, cached).
+ *
+ * Populates g_tzOrder with TZ_LIST indices sorted by name, keeping TZ_LIST's
+ * own index order fixed (aliases and tzFindByIana() depend on it).
+ */
 static void ensureTzOrder() {
     if (g_tzOrderReady) return;
     for (int i = 0; i < TZ_COUNT; i++) g_tzOrder[i] = i;
@@ -78,7 +90,15 @@ static const int TRK_RNG_Y  = TRK_SYM_Y + 14 + 2 * (TRK_BTN_H + 4) + 12 + 14; //
 
 // ─── Drawing helpers ──────────────────────────────────────────────────────────
 
-// Filled rounded button, label centred
+/**
+ * @brief Draw a filled rounded button with a centred label.
+ * @param x,y,w,h  Button rectangle in screen pixels.
+ * @param bg       Fill colour (RGB888).
+ * @param border   Border colour (RGB888).
+ * @param fg       Label text colour (RGB888).
+ * @param label    Button caption.
+ * @param font     Label font; defaults to UI_FONT_9.
+ */
 static void drawBtn(int x, int y, int w, int h,
                     uint32_t bg, uint32_t border, uint32_t fg,
                     const char* label,
@@ -94,7 +114,10 @@ static void drawBtn(int x, int y, int w, int h,
     spr.print(label);
 }
 
-// Sub-page header with back arrow left, title centred
+/**
+ * @brief Draw a sub-page header bar: a back arrow at the left, title centred.
+ * @param title  Sub-page title text.
+ */
 static void drawSubHeader(const char* title) {
     spr.fillRect(0, HDR_Y, SCREEN_W, HDR_H, C(0x1A1A1AUL));
     spr.drawFastHLine(0, HDR_Y + HDR_H - 1, SCREEN_W, C(COL_BORDER));
@@ -113,8 +136,12 @@ static const int MNU_SB_W    = 22;
 static const int MNU_ARROW_H = 22;
 static const int MNU_LIST_W  = SCREEN_W - MNU_SB_W;
 static const int MNU_ROW_H   = 28;
-static const int MNU_NROWS   = 11;  // 8 sub-page rows + 3 inline toggles
+static const int MNU_NROWS   = 16;  // 10 sub-page rows + 6 inline toggles
 
+/**
+ * @brief Draw the main settings menu: a scrollable list of 16 alphabetical rows
+ *        (inline toggles and sub-page links) with a draggable sidebar scrollbar.
+ */
 static void drawMenu() {
     // Header
     spr.fillRect(0, HDR_Y, SCREEN_W, HDR_H, C(0x1A1A1AUL));
@@ -145,30 +172,33 @@ static void drawMenu() {
         }
     }
 
-    // Alphabetical row order (11 rows):
-    //  0 Brightness  1 Callsign  2 Distance Units  3 ISS Pass Alert
-    //  4 Location    5 Mode Filter  6 Screens  7 Temperature Units
-    //  8 Timezone    9 Touch Calibrate  10 Tracker
-    // Rows 2, 3, 7 are inline toggles; the rest navigate to a sub-page.
-    // Sub-page label index: li = ri < 2 ? ri : (ri < 4 ? -1 : (ri < 7 ? ri-2 : (ri==7 ? -1 : ri-3)))
-    static const char* labels[8] = {
-        "Brightness", "Callsign", "Location", "Mode Filter",
-        "Screens", "Timezone", "Touch Calibrate", "Tracker"
+    // Alphabetical row order (16 rows):
+    //  0 Brightness  1 Callsign  2 Distance Units  3 ISS Frequencies
+    //  4 ISS Pass Alert  5 ISS Visible LED  6 Lightning LED  7 Location
+    //  8 Mode Filter  9 Screens  10 Service  11 Startup LED
+    //  12 Stocks Tracker  13 Temperature Units  14 Timezone  15 Touch Calibrate
+    // Rows 2, 4, 5, 6, 11, 13 are inline toggles; the rest navigate to a sub-page.
+    // Sub-page rows 0,1,3,7,8,9,10,12,14,15 map to labels[] below.
+    static const char* labels[10] = {
+        "Brightness", "Callsign", "ISS Frequencies", "Location",
+        "Mode Filter", "Screens", "Service", "Stocks Tracker",
+        "Timezone", "Touch Calibrate"
     };
 
-    // Helper to draw a two-option selector button pair
-    // left button highlighted green when leftSel==true, right highlighted green otherwise
-    auto drawSelector = [&](int bx, int ry, const char* leftLbl, const char* rightLbl, bool leftSel) {
-        int lw = spr.textWidth(leftLbl)  + 12;
-        int rw = spr.textWidth(rightLbl) + 12;
-        spr.fillRoundRect(bx,      ry + 5, lw, 18, 3,  leftSel ? C(COL_GREEN)  : C(COL_BORDER));
-        spr.drawRoundRect(bx,      ry + 5, lw, 18, 3,  C(COL_GREY));
+    // Two-option selector, right-justified and sized to match the ON/OFF toggle
+    // buttons (left 32 px, right 36 px). Selected option is green; labels centred.
+    // left button highlighted green when leftSel==true, right highlighted otherwise
+    auto drawSelector = [&](int ry, const char* leftLbl, const char* rightLbl, bool leftSel) {
+        const int LX = MNU_LIST_W - 76, LW = 32;   // matches the "ON" button
+        const int RX = MNU_LIST_W - 40, RW = 36;   // matches the "OFF" button
         spr.setTextColor(C(COL_WHITE));
-        spr.setCursor(bx + 6, ry + 8);
+        spr.fillRoundRect(LX, ry + 5, LW, 18, 3, leftSel ? C(COL_GREEN) : C(COL_BORDER));
+        spr.drawRoundRect(LX, ry + 5, LW, 18, 3, C(COL_GREY));
+        spr.setCursor(LX + (LW - spr.textWidth(leftLbl)) / 2, ry + 8);
         spr.print(leftLbl);
-        spr.fillRoundRect(bx + lw + 4, ry + 5, rw, 18, 3, leftSel ? C(COL_BORDER) : C(COL_GREEN));
-        spr.drawRoundRect(bx + lw + 4, ry + 5, rw, 18, 3, C(COL_GREY));
-        spr.setCursor(bx + lw + 10, ry + 8);
+        spr.fillRoundRect(RX, ry + 5, RW, 18, 3, leftSel ? C(COL_BORDER) : C(COL_GREEN));
+        spr.drawRoundRect(RX, ry + 5, RW, 18, 3, C(COL_GREY));
+        spr.setCursor(RX + (RW - spr.textWidth(rightLbl)) / 2, ry + 8);
         spr.print(rightLbl);
     };
 
@@ -184,9 +214,9 @@ static void drawMenu() {
             spr.setTextColor(C(COL_WHITE));
             spr.setCursor(14, ry + 8);
             spr.print("Distance Units");
-            drawSelector(MNU_LIST_W - 88, ry, "mi", "km", !g_settings.useKm);
+            drawSelector(ry, "mi", "km", !g_settings.useKm);
 
-        } else if (ri == 3) {
+        } else if (ri == 4) {
             // ISS Pass Alert — greyed out when Grey Line screen is disabled
             bool greyAvail = g_settings.screenEnabled[SCR_GREYLINE];
             bool on        = greyAvail && g_settings.issJumpEnabled;
@@ -209,16 +239,69 @@ static void drawMenu() {
                 spr.print("(ISS Tracker off)");
             }
 
-        } else if (ri == 7) {
+        } else if (ri == 5) {
+            // ISS Visible LED ON/OFF — flashes the onboard green LED during a
+            // visible pass. Works independently of the Grey Line screen.
+            bool on = g_settings.issLedEnabled;
+            spr.setTextColor(C(COL_WHITE));
+            spr.setCursor(14, ry + 8);
+            spr.print("ISS Visible LED");
+            spr.fillRoundRect(MNU_LIST_W - 76, ry + 5, 32, 18, 3, on ? C(COL_GREEN)  : C(COL_BORDER));
+            spr.drawRoundRect(MNU_LIST_W - 76, ry + 5, 32, 18, 3, C(COL_GREY));
+            spr.setTextColor(C(COL_WHITE));
+            spr.setCursor(MNU_LIST_W - 68, ry + 8);
+            spr.print("ON");
+            spr.fillRoundRect(MNU_LIST_W - 40, ry + 5, 36, 18, 3, on ? C(COL_BORDER) : C(COL_RED));
+            spr.drawRoundRect(MNU_LIST_W - 40, ry + 5, 36, 18, 3, C(COL_GREY));
+            spr.setCursor(MNU_LIST_W - 34, ry + 8);
+            spr.print("OFF");
+
+        } else if (ri == 6) {
+            // Lightning LED ON/OFF — flashes the onboard red LED on a lightning alert
+            bool on = g_settings.lightningLedEnabled;
+            spr.setTextColor(C(COL_WHITE));
+            spr.setCursor(14, ry + 8);
+            spr.print("Lightning LED");
+            spr.fillRoundRect(MNU_LIST_W - 76, ry + 5, 32, 18, 3, on ? C(COL_GREEN)  : C(COL_BORDER));
+            spr.drawRoundRect(MNU_LIST_W - 76, ry + 5, 32, 18, 3, C(COL_GREY));
+            spr.setTextColor(C(COL_WHITE));
+            spr.setCursor(MNU_LIST_W - 68, ry + 8);
+            spr.print("ON");
+            spr.fillRoundRect(MNU_LIST_W - 40, ry + 5, 36, 18, 3, on ? C(COL_BORDER) : C(COL_RED));
+            spr.drawRoundRect(MNU_LIST_W - 40, ry + 5, 36, 18, 3, C(COL_GREY));
+            spr.setCursor(MNU_LIST_W - 34, ry + 8);
+            spr.print("OFF");
+
+        } else if (ri == 11) {
+            // Startup LED ON/OFF — flashes the onboard blue LED while data loads
+            bool on = g_settings.startupLedEnabled;
+            spr.setTextColor(C(COL_WHITE));
+            spr.setCursor(14, ry + 8);
+            spr.print("Startup LED");
+            spr.fillRoundRect(MNU_LIST_W - 76, ry + 5, 32, 18, 3, on ? C(COL_GREEN)  : C(COL_BORDER));
+            spr.drawRoundRect(MNU_LIST_W - 76, ry + 5, 32, 18, 3, C(COL_GREY));
+            spr.setTextColor(C(COL_WHITE));
+            spr.setCursor(MNU_LIST_W - 68, ry + 8);
+            spr.print("ON");
+            spr.fillRoundRect(MNU_LIST_W - 40, ry + 5, 36, 18, 3, on ? C(COL_BORDER) : C(COL_RED));
+            spr.drawRoundRect(MNU_LIST_W - 40, ry + 5, 36, 18, 3, C(COL_GREY));
+            spr.setCursor(MNU_LIST_W - 34, ry + 8);
+            spr.print("OFF");
+
+        } else if (ri == 13) {
             // Temperature Units: [°C] [°F]
             spr.setTextColor(C(COL_WHITE));
             spr.setCursor(14, ry + 8);
             spr.print("Temperature");
-            drawSelector(MNU_LIST_W - 80, ry, "C", "F", g_settings.useCelsius);
+            drawSelector(ry, "C", "F", g_settings.useCelsius);
 
         } else {
-            // Sub-page navigation row
-            int li = ri < 2 ? ri : (ri < 7 ? ri - 2 : ri - 3);
+            // Sub-page navigation row. Sub-page rows: 0,1,3,7,8,9,10,12,14,15.
+            int li = ri < 2  ? ri
+                   : ri == 3  ? 2
+                   : ri < 11  ? ri - 4    // 7,8,9,10 → 3,4,5,6
+                   : ri == 12 ? 7         // Stocks Tracker
+                              : ri - 6;   // 14,15 → 8,9
             spr.setTextColor(C(COL_WHITE));
             spr.setCursor(14, ry + 8);
             spr.print(labels[li]);
@@ -263,6 +346,8 @@ static void drawMenu() {
 }
 
 // ─── PAGE_LOCATION ────────────────────────────────────────────────────────────
+/** @brief Draw the Location sub-page: a 6-character Maidenhead grid editor with
+ *         up/down spinners per column and the resolved lat/lon. */
 static void drawLocation() {
     drawSubHeader("LOCATION");
 
@@ -318,6 +403,8 @@ static const int TZ_SB_W    = 22;                    // right-hand sidebar width
 static const int TZ_ARROW_H = 22;                    // up/down button height
 static const int TZ_LIST_W  = SCREEN_W - TZ_SB_W;     // row content width
 
+/** @brief Draw the Timezone sub-page: a scrollable alphabetical list of zones
+ *         with the current one highlighted, plus an auto-detect option. */
 static void drawTimezone() {
     drawSubHeader("TIMEZONE");
     ensureTzOrder();
@@ -407,6 +494,8 @@ static const int SCR_ARROW_H = 22;                     // up/down button height
 static const int SCR_LIST_W  = SCREEN_W - SCR_SB_W;    // row content width
 static const int SCR_BTN_X   = SCR_LIST_W - 58;        // ON/OFF button x
 
+/** @brief Draw the Screens sub-page: a scrollable list of every screen with a
+ *         per-screen enable/disable toggle. */
 static void drawScreens() {
     drawSubHeader("SCREENS");
 
@@ -501,8 +590,10 @@ static void drawScreens() {
 }
 
 // ─── PAGE_TRACKER ─────────────────────────────────────────────────────────────
+/** @brief Draw the Stocks Tracker sub-page: preset symbol buttons and a
+ *         history-range (years) selector. */
 static void drawTracker() {
-    drawSubHeader("TRACKER");
+    drawSubHeader("STOCKS TRACKER");
 
     // Symbol label
     spr.setFont(UI_FONT_9);
@@ -546,6 +637,8 @@ static void drawTracker() {
 // Reuses the same 6-column ▲/char/▼ layout as the location editor.
 // Characters cycle through: space, A-Z, 0-9, / (38 options total).
 // The callsign is stored upper-case; trailing spaces are stripped on DONE.
+/** @brief Draw the Callsign sub-page: a per-character spinner editor for the
+ *         amateur callsign used by PSK Reporter and FT8 Spots. */
 static void drawCallsign() {
     drawSubHeader("CALLSIGN");
 
@@ -594,6 +687,12 @@ static void drawCallsign() {
 }
 
 // Cycle a callsign character: space → A-Z → 0-9 → / → space
+/**
+ * @brief Cycle one character of the callsign editor through its allowed set.
+ * @param cs   Callsign working buffer (modified in place).
+ * @param pos  Index of the character to change.
+ * @param dir  +1 for the next allowed character, -1 for the previous.
+ */
 static void cycleCallChar(char* cs, int pos, int dir) {
     // Charset: ' '(0), A-Z(1-26), 0-9(27-36), '/'(37) — 38 entries
     static const char CALL_CHARS[] = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/";
@@ -606,6 +705,8 @@ static void cycleCallChar(char* cs, int pos, int dir) {
 }
 
 // ─── PAGE_BRIGHTNESS ─────────────────────────────────────────────────────────
+/** @brief Draw the Brightness sub-page: a live backlight-level slider with a
+ *         preview swatch. */
 static void drawBrightness() {
     drawSubHeader("BRIGHTNESS");
 
@@ -685,6 +786,8 @@ static const char* MODE_NAMES[MODE_NROWS] = {
     "CW", "Voice (SSB/FM/AM)", "FT8", "FT4", "Digital (RTTY/PSK)", "Other"
 };
 
+/** @brief Draw the Mode Filter sub-page: per-mode (CW/SSB/FT8/…) enable toggles
+ *         applied to the spot screens. */
 static void drawModes() {
     drawSubHeader("MODE FILTER");
 
@@ -707,6 +810,188 @@ static void drawModes() {
     spr.drawFastHLine(0, BODY_Y + MODE_NROWS * ROW_H, SCREEN_W, C(COL_BORDER));
 }
 
+// ─── PAGE_ISSFREQ / PAGE_ISSFREQ_EDIT ────────────────────────────────────────
+static const int    ISSFREQ_ROW_H = 30;
+static const char*  ISSFREQ_LABEL[4] = {
+    "SSTV", "APRS", "Repeater In", "Repeater Out"
+};
+/**
+ * @brief Get a pointer to the settings field for one ISS frequency slot.
+ * @param i  Slot index: 0=SSTV, 1=APRS, 2=Repeater In, 3=Repeater Out (default).
+ * @return Pointer to the corresponding g_settings float field.
+ */
+static float* issFreqPtr(int i) {
+    switch (i) {
+        case 0:  return &g_settings.issFreqSstv;
+        case 1:  return &g_settings.issFreqAprs;
+        case 2:  return &g_settings.issFreqRptIn;
+        default: return &g_settings.issFreqRptOut;
+    }
+}
+
+/**
+ * @brief Load a MHz value into the 6 working digits (DDD.DDD, kHz resolution).
+ * @param mhz  Frequency in MHz; clamped to the 000.000–999.999 range.
+ */
+static void freqLoadDigits(float mhz) {
+    long kHz = lroundf(mhz * 1000.0f);
+    if (kHz < 0)      kHz = 0;
+    if (kHz > 999999) kHz = 999999;
+    g_editDigits[0] = (kHz / 100000) % 10;
+    g_editDigits[1] = (kHz / 10000)  % 10;
+    g_editDigits[2] = (kHz / 1000)   % 10;
+    g_editDigits[3] = (kHz / 100)    % 10;
+    g_editDigits[4] = (kHz / 10)     % 10;
+    g_editDigits[5] =  kHz           % 10;
+}
+/** @brief Assemble the 6 working digits back into a MHz value.
+ *  @return The edited frequency in MHz (kHz resolution). */
+static float freqFromDigits() {
+    long kHz = g_editDigits[0] * 100000L + g_editDigits[1] * 10000L + g_editDigits[2] * 1000L
+             + g_editDigits[3] * 100L    + g_editDigits[4] * 10L    + g_editDigits[5];
+    return kHz / 1000.0f;
+}
+
+/** @brief Draw the ISS Frequencies sub-page: the four configured downlink/uplink
+ *         frequencies, each tappable to open the digit editor. */
+static void drawIssFreq() {
+    drawSubHeader("ISS FREQUENCIES");
+    for (int i = 0; i < 4; i++) {
+        int ry = BODY_Y + i * ISSFREQ_ROW_H;
+        spr.drawFastHLine(0, ry, SCREEN_W, C(COL_BORDER));
+        spr.setFont(UI_FONT_12);
+        spr.setTextColor(C(COL_GREY_L));
+        spr.setCursor(14, ry + 10);
+        spr.print(ISSFREQ_LABEL[i]);
+
+        char vb[16];
+        snprintf(vb, sizeof(vb), "%.3f MHz", *issFreqPtr(i));
+        int vw = spr.textWidth(vb);
+        spr.setTextColor(C(COL_ORANGE));
+        spr.setCursor(SCREEN_W - vw - 24, ry + 10);
+        spr.print(vb);
+        spr.setTextColor(C(COL_GREY));
+        spr.setCursor(SCREEN_W - 16, ry + 10);
+        spr.print(">");
+    }
+    spr.drawFastHLine(0, BODY_Y + 4 * ISSFREQ_ROW_H, SCREEN_W, C(COL_BORDER));
+
+    spr.setFont(UI_FONT_9);
+    spr.setTextColor(C(COL_GREY));
+    spr.setCursor(14, BODY_Y + 4 * ISSFREQ_ROW_H + 12);
+    spr.print("Tap a frequency to edit");
+}
+
+/** @brief Draw the ISS-frequency digit editor: six per-digit up/down spinners
+ *         (DDD.DDD MHz) for the selected frequency slot. */
+static void drawIssFreqEdit() {
+    drawSubHeader(ISSFREQ_LABEL[g_editFreqSel]);
+
+    // ▲ buttons (reusing the LOCATION page's 6-column spinner geometry)
+    for (int i = 0; i < 6; i++) {
+        int bx = i * LOC_COL_W + (LOC_COL_W - 36) / 2;
+        spr.fillRoundRect(bx, LOC_UP_Y, 36, LOC_BTN_H, 3, C(COL_PANEL));
+        spr.drawRoundRect(bx, LOC_UP_Y, 36, LOC_BTN_H, 3, C(COL_BORDER));
+        spr.setFont(UI_FONT_12);
+        spr.setTextColor(C(COL_GREY_L));
+        spr.setCursor(bx + 13, LOC_UP_Y + 8);
+        spr.print("^");
+    }
+
+    // Digits DDD.DDD
+    for (int i = 0; i < 6; i++) {
+        char ch[2] = { (char)('0' + g_editDigits[i]), 0 };
+        spr.setFont(UI_FONT_24);
+        int cw = spr.textWidth(ch);
+        spr.setTextColor(C(COL_WHITE));
+        spr.setCursor(i * LOC_COL_W + (LOC_COL_W - cw) / 2, LOC_CHAR_Y + 4);
+        spr.print(ch);
+    }
+    // Decimal point in the gap between the 3rd and 4th digit
+    spr.setFont(UI_FONT_24);
+    spr.setTextColor(C(COL_ORANGE));
+    spr.setCursor(3 * LOC_COL_W - 6, LOC_CHAR_Y + 4);
+    spr.print(".");
+
+    // ▼ buttons
+    for (int i = 0; i < 6; i++) {
+        int bx = i * LOC_COL_W + (LOC_COL_W - 36) / 2;
+        spr.fillRoundRect(bx, LOC_DN_Y, 36, LOC_BTN_H, 3, C(COL_PANEL));
+        spr.drawRoundRect(bx, LOC_DN_Y, 36, LOC_BTN_H, 3, C(COL_BORDER));
+        spr.setFont(UI_FONT_12);
+        spr.setTextColor(C(COL_GREY_L));
+        spr.setCursor(bx + 13, LOC_DN_Y + 8);
+        spr.print("v");
+    }
+
+    // Resulting value + unit
+    spr.setFont(UI_FONT_9);
+    spr.setTextColor(C(COL_GREY));
+    char vb[20];
+    snprintf(vb, sizeof(vb), "%.3f MHz", freqFromDigits());
+    int vw = spr.textWidth(vb);
+    spr.setCursor((SCREEN_W - vw) / 2, LOC_INFO_Y);
+    spr.print(vb);
+    spr.drawFastHLine(8, LOC_INFO_Y + 14, SCREEN_W - 16, C(COL_BORDER));
+
+    drawBtn((SCREEN_W - 110) / 2, LOC_DONE_Y, 110, 28,
+            COL_ORANGE_D, COL_ORANGE, COL_WHITE, "DONE");
+}
+
+// ─── PAGE_SERVICE ─────────────────────────────────────────────────────────────
+static const int    SVC_ROW_H = 30;
+static const char*  SVC_LABELS[3] = { "Screenshot (3s hold)", "Fake Lightning", "Fake ISS Pass" };
+/**
+ * @brief Read the current on/off state of a Service-menu row.
+ * @param i  Row index: 0=screenshot hold, 1=fake lightning, 2=fake ISS pass.
+ * @return true if that service option is currently enabled.
+ */
+static bool serviceState(int i) {
+    return i == 0 ? g_settings.screenshotHoldEnabled
+         : i == 1 ? g_fakeLightning
+                  : g_fakeISSPass;
+}
+
+/** @brief Draw the Service sub-page: toggles for the 3-second screenshot hold and
+ *         the fake lightning / fake ISS-pass test aids. */
+static void drawService() {
+    drawSubHeader("SERVICE");
+    for (int i = 0; i < 3; i++) {
+        int ry = BODY_Y + i * SVC_ROW_H;
+        spr.drawFastHLine(0, ry, SCREEN_W, C(COL_BORDER));
+        spr.setFont(UI_FONT_12);
+        spr.setTextColor(C(COL_WHITE));
+        spr.setCursor(14, ry + 10);
+        spr.print(SVC_LABELS[i]);
+
+        bool on = serviceState(i);
+        spr.fillRoundRect(SCREEN_W - 76, ry + 6, 32, 18, 3, on ? C(COL_GREEN)  : C(COL_BORDER));
+        spr.drawRoundRect(SCREEN_W - 76, ry + 6, 32, 18, 3, C(COL_GREY));
+        spr.setTextColor(C(COL_WHITE));
+        spr.setCursor(SCREEN_W - 68, ry + 9);
+        spr.print("ON");
+        spr.fillRoundRect(SCREEN_W - 40, ry + 6, 36, 18, 3, on ? C(COL_BORDER) : C(COL_RED));
+        spr.drawRoundRect(SCREEN_W - 40, ry + 6, 36, 18, 3, C(COL_GREY));
+        spr.setCursor(SCREEN_W - 34, ry + 9);
+        spr.print("OFF");
+    }
+    spr.drawFastHLine(0, BODY_Y + 3 * SVC_ROW_H, SCREEN_W, C(COL_BORDER));
+
+    spr.setFont(UI_FONT_9);
+    spr.setTextColor(C(COL_GREY));
+    spr.setCursor(14, BODY_Y + 3 * SVC_ROW_H + 12);
+    spr.print("Hold the screen 3s to save a BMP screenshot to SD.");
+    spr.setCursor(14, BODY_Y + 3 * SVC_ROW_H + 26);
+    spr.print("Fakes reset on reboot.");
+}
+
+/**
+ * @brief Run the interactive touch-calibration routine (blocking).
+ *
+ * Clears any saved calibration, draws directly to the display, has the user
+ * touch the crosshairs, then stores the new calibration to settings and
+ * returns to the main settings menu.
+ */
 static void runCalibration() {
     // Clear any existing calibration so the crosshairs use raw defaults
     g_settings.touchCalValid = false;
@@ -743,6 +1028,8 @@ static void runCalibration() {
 }
 
 // ─── PAGE_TZ_DETECT ───────────────────────────────────────────────────────────
+/** @brief Draw the auto-detect-timezone page: shows progress, the detected zone
+ *         (which it applies and saves once), or an error with a manual-set hint. */
 static void drawTzDetect() {
     drawSubHeader("TIMEZONE");
 
@@ -798,6 +1085,8 @@ static void drawTzDetect() {
 }
 
 // ─── Public: draw ─────────────────────────────────────────────────────────────
+/** @brief Draw the current settings page, dispatching on the active page enum.
+ *         See screen_settings.h. */
 void drawScreenSettings() {
     if (g_page == PAGE_CALIBRATE) {
         runCalibration();
@@ -813,11 +1102,16 @@ void drawScreenSettings() {
         case PAGE_MODES:       drawModes();       break;
         case PAGE_TZ_DETECT:   drawTzDetect();   break;
         case PAGE_BRIGHTNESS:  drawBrightness(); break;
+        case PAGE_ISSFREQ:      drawIssFreq();     break;
+        case PAGE_ISSFREQ_EDIT: drawIssFreqEdit(); break;
+        case PAGE_SERVICE:      drawService();     break;
         default: break;
     }
 }
 
 // ─── Public: enter ────────────────────────────────────────────────────────────
+/** @brief Enter the settings UI: reset to the main menu and seed the editors
+ *         (grid, callsign) and timezone scroll position. See screen_settings.h. */
 void settingsEnter() {
     g_page     = PAGE_MENU;
     g_scrScroll = 0;
@@ -842,6 +1136,14 @@ void settingsEnter() {
 }
 
 // ─── Grid char cycling ────────────────────────────────────────────────────────
+/**
+ * @brief Cycle one character of the Maidenhead grid editor within its valid set.
+ *
+ * Fields 0–1 cycle A–R, positions 2–3 cycle 0–9, and positions 4–5 cycle a–x.
+ * @param grid  Grid working buffer (modified in place).
+ * @param pos   Character index (0–5).
+ * @param dir   +1 for the next character, -1 for the previous (wraps).
+ */
 static void cycleChar(char* grid, int pos, int dir) {
     char c = grid[pos];
     if (pos < 2) {
@@ -858,6 +1160,9 @@ static void cycleChar(char* grid, int pos, int dir) {
 }
 
 // ─── Public: touch ────────────────────────────────────────────────────────────
+/** @brief Handle a finger-up gesture on the settings UI, dispatching per page
+ *         (taps toggle/navigate, swipes/scroll where relevant).
+ *         See screen_settings.h. @return true when settings should close. */
 bool settingsTouchUp(int32_t sx, int32_t sy,
                      int32_t ex, int32_t ey,
                      uint32_t dtMs) {
@@ -910,22 +1215,34 @@ bool settingsTouchUp(int32_t sx, int32_t sy,
 
             if (ri == 2) {
                 // Distance Units: [mi] left button | [km] right button
-                // Buttons drawn starting at MNU_LIST_W-88; boundary between them ≈ MNU_LIST_W-60
-                bool nowKm = (sx >= MNU_LIST_W - 60);
+                // Split at the OFF-button edge, matching the ON/OFF toggles.
+                bool nowKm = (sx >= MNU_LIST_W - 40);
                 if (nowKm != g_settings.useKm) {
                     g_settings.useKm = nowKm;
                     settingsSave();
                 }
-            } else if (ri == 3) {
+            } else if (ri == 4) {
                 // ISS Pass Alert ON/OFF toggle — only if Grey Line screen is on
                 if (g_settings.screenEnabled[SCR_GREYLINE]) {
                     g_settings.issJumpEnabled = (sx < MNU_LIST_W - 40);
                     settingsSave();
                 }
-            } else if (ri == 7) {
+            } else if (ri == 5) {
+                // ISS Visible LED ON/OFF toggle (same button geometry as row 4)
+                g_settings.issLedEnabled = (sx < MNU_LIST_W - 40);
+                settingsSave();
+            } else if (ri == 6) {
+                // Lightning LED ON/OFF toggle (same button geometry as row 4)
+                g_settings.lightningLedEnabled = (sx < MNU_LIST_W - 40);
+                settingsSave();
+            } else if (ri == 11) {
+                // Startup LED ON/OFF toggle (same button geometry as row 4)
+                g_settings.startupLedEnabled = (sx < MNU_LIST_W - 40);
+                settingsSave();
+            } else if (ri == 13) {
                 // Temperature: [C] left button | [F] right button
-                // Buttons drawn starting at MNU_LIST_W-80; boundary between them ≈ MNU_LIST_W-60
-                bool nowCelsius = (sx < MNU_LIST_W - 60);
+                // Split at the OFF-button edge, matching the ON/OFF toggles.
+                bool nowCelsius = (sx < MNU_LIST_W - 40);
                 if (nowCelsius != g_settings.useCelsius) {
                     g_settings.useCelsius = nowCelsius;
                     settingsSave();
@@ -940,12 +1257,14 @@ bool settingsTouchUp(int32_t sx, int32_t sy,
                           for (int i = 0; i < cl; i++) g_editCall[i] = g_settings.callsign[i]; }
                         g_page = PAGE_CALLSIGN;
                         break;
-                    case 4: g_page = PAGE_LOCATION; break;
-                    case 5: g_page = PAGE_MODES; break;
-                    case 6: g_page = PAGE_SCREENS;  g_scrScroll = 0; break;
-                    case 8: g_page = PAGE_TIMEZONE; break;
-                    case 9: g_page = PAGE_CALIBRATE; break;
-                    case 10: g_page = PAGE_TRACKER;  break;
+                    case 3: g_page = PAGE_ISSFREQ;  break;
+                    case 7: g_page = PAGE_LOCATION; break;
+                    case 8: g_page = PAGE_MODES; break;
+                    case 9: g_page = PAGE_SCREENS;  g_scrScroll = 0; break;
+                    case 10: g_page = PAGE_SERVICE; break;
+                    case 12: g_page = PAGE_TRACKER;  break;   // Stocks Tracker
+                    case 14: g_page = PAGE_TIMEZONE; break;
+                    case 15: g_page = PAGE_CALIBRATE; break;
                 }
             }
         }
@@ -1194,6 +1513,59 @@ bool settingsTouchUp(int32_t sx, int32_t sy,
                         break;
                     }
                     pbx += PBW + 8;
+                }
+            }
+        }
+        break;
+
+    // ── ISS FREQUENCIES (list) ──────────────────────────────────────────────────
+    case PAGE_ISSFREQ:
+        if (isTap && sy < BODY_Y && sx < 40) { g_page = PAGE_MENU; break; }
+        if (!isTap) break;
+        if (sy >= BODY_Y) {
+            int i = (sy - BODY_Y) / ISSFREQ_ROW_H;
+            if (i >= 0 && i < 4) {
+                g_editFreqSel = i;
+                freqLoadDigits(*issFreqPtr(i));
+                g_page = PAGE_ISSFREQ_EDIT;
+            }
+        }
+        break;
+
+    // ── ISS FREQUENCY EDITOR (digit spinner) ────────────────────────────────────
+    case PAGE_ISSFREQ_EDIT:
+        if (isTap && sy < BODY_Y && sx < 40) { g_page = PAGE_ISSFREQ; break; }  // back, discard
+        if (!isTap) break;
+        {
+            int col = sx / LOC_COL_W;
+            if (col < 0) col = 0;
+            if (col > 5) col = 5;
+
+            if (sy >= LOC_DONE_Y && sy < LOC_DONE_Y + 28) {
+                *issFreqPtr(g_editFreqSel) = freqFromDigits();
+                settingsSave();
+                g_page = PAGE_ISSFREQ;
+                break;
+            }
+            if (sy >= LOC_UP_Y && sy < LOC_UP_Y + LOC_BTN_H)
+                g_editDigits[col] = (uint8_t)((g_editDigits[col] + 1) % 10);
+            else if (sy >= LOC_DN_Y && sy < LOC_DN_Y + LOC_BTN_H)
+                g_editDigits[col] = (uint8_t)((g_editDigits[col] + 9) % 10);
+        }
+        break;
+
+    // ── SERVICE ─────────────────────────────────────────────────────────────────
+    case PAGE_SERVICE:
+        if (isTap && sy < BODY_Y && sx < 40) { g_page = PAGE_MENU; break; }  // back
+        if (!isTap) break;
+        if (sy >= BODY_Y) {
+            int i = (sy - BODY_Y) / SVC_ROW_H;
+            if (i >= 0 && i < 3) {
+                bool on = (sx < SCREEN_W - 40);   // left = ON, right = OFF
+                switch (i) {
+                    case 0: g_settings.screenshotHoldEnabled = on; settingsSave(); break;
+                    case 1: g_fakeLightning = on; break;
+                    case 2: g_fakeISSPass   = on; break;
                 }
             }
         }

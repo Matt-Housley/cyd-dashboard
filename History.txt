@@ -1,6 +1,215 @@
 CYD Dashboard — Version History
 ================================
 
+1.18.031  2026-07-24
+  [Feature] Added a PlatformIO/Unity unit-test suite (test/test_logic), run with
+            "pio test -e test". Because the codebase is welded to hardware headers,
+            the tests run on the ESP32 against the real firmware code (the new
+            [env:test] compiles src/ in and defines RUN_UNIT_TESTS so main.cpp
+            hands setup()/loop() to the Unity runner). Covers gridToLatLon,
+            classifyMode, tzFindByIana, callCountry, and fmtPrice.
+  [Fix] fmtPrice thousands-grouping off-by-one: prices with 4/5/7-digit integer
+        parts were mis-punctuated (e.g. 5123.45 -> ",5123.45", 1234567.89 ->
+        ",123,4567.89"). Now groups correctly (5,123.45 / 1,234,567.89), which
+        fixes the Stocks Tracker price and Y-axis labels. Caught by the new tests.
+
+1.18.030  2026-07-23
+  [Fix] Screenshots use the lean SdFat library on hardware VSPI, mounted once and
+        kept mounted. SdFat's ~512-byte footprint (vs the Arduino SD library's
+        ~24 KB esp_vfs_fat stack) leaves the mbedTLS reserve intact, so no unmount
+        cycling is needed — which also fixes the "No SD card" remount failures.
+        Logs heap/largest-block around the mount for verification.
+
+1.18.029  2026-07-23
+  [Fix] Screenshot SD re-mount reliability: begin the VSPI bus once and keep it
+        (cycling SPI end/begin doesn't re-init on the ESP32, which caused a
+        "No SD card" after the first capture). Still unmount the filesystem
+        (SD.end) per shot to free the FAT buffers.
+
+1.18.028  2026-07-23
+  [Fix] Screenshot no longer starves TLS / triggers an SSL-reboot. The SD card is
+        now mounted only for the moment of the capture and unmounted immediately
+        after — keeping it mounted permanently collapsed the largest contiguous
+        heap block that the mbedTLS handshake reserve needs.
+
+1.18.027  2026-07-23
+  [Fix] Screenshot colours corrected — readRect returns byte-swapped RGB565, so
+        the bytes are now swapped before packing the BMP (orange was appearing
+        blue, yellow as magenta).
+
+1.18.026  2026-07-23
+  [Fix] SD screenshots working: the touch is now bit-banged in software
+        (LovyanGFX touch spi_host = -1), which frees the VSPI hardware for the SD
+        card. The SD uses hardware VSPI at 25 MHz (fast, no freeze). This mirrors
+        the standard CYD approach (bit-banged touch + hardware-SPI SD) and fixes
+        both the earlier mount failure and the touch dying after a screenshot.
+        Reverted the SdFat software-SPI workaround.
+
+1.18.025  2026-07-23
+  [Fix] SD screenshots now use software (bit-banged) SPI via SdFat. Both hardware
+        SPI hosts are taken (display HSPI, touch VSPI), so hardware SD.begin
+        always failed; software SPI on GPIO 18/19/23/5 coexists with the touch.
+        Slower (brief freeze while writing), but functional.
+
+1.18.024  2026-07-23
+  [Change] SD screenshot: added serial diagnostics ([sd] ...) and a clock-speed
+           fallback (20/8/4/1 MHz) to the SD mount, to debug "No SD card".
+
+1.18.023  2026-07-23
+  [Change] Removed the vestigial 2-second long-press that opened Settings (it was
+           unreliable on the resistive panel and superseded by the status-bar
+           cog). The only hold gesture now is the 3-second screenshot press.
+
+1.18.022  2026-07-23
+  [Feature] Settings > Service sub-menu (for documentation screenshots):
+            - "Screenshot (3s hold)": when ON, holding the screen for 3 s saves a
+              24-bit BMP of the current frame to the SD card (scr0000.bmp, ...);
+              a toast confirms. While enabled, the 3 s hold replaces the 2 s
+              settings long-press (open Settings via the cog instead).
+            - "Fake Lightning": stages a lightning alert (red LED + banner).
+            - "Fake ISS Pass": injects a synthetic overhead ISS pass.
+            Fakes are ON/OFF toggles that reset on reboot. microSD uses the CYD's
+            VSPI slot (CS 5, SCK 18, MISO 19, MOSI 23).
+
+1.18.021  2026-07-23
+  [Change] Settings: the Distance Units (mi/km) and Temperature (C/F) selector
+           buttons are now right-justified and sized to match the ON/OFF toggle
+           buttons, with their labels centred.
+
+1.18.020  2026-07-23
+  [Change] Settings menu "Tracker" renamed to "Stocks Tracker" (and its sub-page
+           header), moved up to keep the list alphabetical (now between Startup
+           LED and Temperature).
+
+1.18.019  2026-07-23
+  [Change] Settings cog redrawn again as a symmetric 11x11 8-tooth gear bitmap
+           (Lucide-style, with a centre hole) — the crossed-bar version looked
+           like a fried egg.
+
+1.18.018  2026-07-23
+  [Fix] Settings cog redrawn as a solid gear (round body + four chunky teeth +
+        hub hole) instead of the spiky "sunshine" with detached corner teeth.
+  [Fix] Blue startup LED now keeps flashing until the PSK Reporter and FT8 Spots
+        data have also loaded (they were previously excluded from the check, so
+        it stopped while those screens still showed "Fetching...").
+
+1.18.017  2026-07-23
+  [Change] Status bar icons: the jump-to-screen button now uses the three-bar
+           (hamburger) icon, and the settings button is a proper cog instead of
+           the bars. Touch targets unchanged.
+
+1.18.016  2026-07-23
+  [Change] Removed the Rewind and Fast Forward icons from the status bar — the
+           jump-to-screen menu (Circle button) and horizontal swipes cover
+           screen navigation. Status bar right side is now Play/Pause, Circle,
+           WiFi, settings.
+
+1.18.015  2026-07-23
+  [Feature] Onboard blue LED flashes at startup while the screens are still being
+            populated with fetched data, and stops once the initial fetches
+            complete. Toggle under Settings > "Startup LED" (default ON).
+  [Fix] News headline popup made taller so the descender of "tap to close" no
+        longer hangs below the box border.
+
+1.18.014  2026-07-23
+  [Feature] Tap a headline on the BBC News or Apple News screen to open the full
+            headline in a popup box (headlines that don't fit are otherwise cut
+            short). Tap anywhere to close; it also auto-closes after 30s, and
+            auto-play pauses while it is open.
+
+1.18.013  2026-07-23
+  [Fix] Lightning alert banner made taller so the descender of "Tap" no longer
+        hangs below the box border.
+
+1.18.012  2026-07-23
+  [Change] Lightning-alert LED refinements. The red/green alternation now fires
+           whenever the ISS Tracker screen is being viewed during a lightning
+           alert (rather than requiring an optically-visible pass). Added a
+           Settings > "Lightning LED" ON/OFF toggle (default ON) to enable/disable
+           the red flashing; the alert banner still shows regardless.
+
+1.18.011  2026-07-23
+  [Feature] Lightning alert. When a thunderstorm is forecast within the next
+            hour (lightningHours 0-1) the onboard LED flashes red, and a red
+            "LIGHTNING ALERT" banner appears on the Weather screen between the
+            current-conditions block and the 7-day forecast (the forecast bars
+            compress to make room). Tapping the banner silences the red LED
+            (the banner stays as a warning); it re-arms when the alert clears.
+            If an ISS pass is visible during a lightning alert the LED alternates
+            red/green. The 7-day layout is byte-identical when no alert is active.
+
+1.18.010  2026-07-22
+  [Change] Degree symbols now use the real font glyph (U+00B0) instead of a
+           hand-drawn circle: Weather current temp (°C/°F) and the 5-day
+           max/min figures, plus the ISS Tracker pass panel (Az/El, rise/set
+           azimuth, max elevation). DejaVu18 gained the extended glyph ranges so
+           the larger current-temp unit can render °C/°F as text.
+
+1.18.009  2026-07-22
+  [Feature] Extended the DejaVu9/12 fonts further with the Euro sign (0x20AC) and
+            the General-Punctuation block (0x2013-0x2026: en/em dash, curly single
+            and double quotes, bullet, ellipsis). News text now shows a real € and
+            a proper wide em-dash / ellipsis instead of ASCII stand-ins. (Curly
+            quotes render but, at 9-12px, look much like straight quotes — the
+            curl needs more pixels than these sizes provide.) Higher Unicode
+            (arrows, emoji, etc.) still folds to ASCII / '?'.
+
+1.18.008  2026-07-22
+  [Feature] Real £ and accented-letter glyphs. The DejaVu9/12 fonts (used for all
+            news / DX / contest text) are extended with the full Latin-1 range
+            (0xA0-0xFF): £, ©, ®, °, and every accented letter (é, ñ, ü, ç, ...)
+            now render properly instead of being transliterated. Base ASCII
+            glyphs are unchanged (copied verbatim); Latin-1 glyphs are rendered
+            from DejaVuSans.ttf to match. Feed text keeps £/accents as UTF-8;
+            higher Unicode (curly quotes, dashes, ellipsis, EUR, emoji) still
+            folds to ASCII. New: src/fonts/dejavu_ext.cpp, tools/gen_dejavu_ext.py.
+
+1.18.007  2026-07-22
+  [Fix] News headlines no longer show blank squares for curly quotes, dashes,
+        ellipses, accented letters, and symbols. The DejaVu fonts only contain
+        ASCII (0x20-0x7E); the feed text pipeline now transliterates raw UTF-8
+        (not just HTML entities) down to ASCII equivalents before drawing
+        (e.g. curly quotes -> ", em-dash -> -, é -> e, £ -> GBP, … -> ...),
+        with anything unmappable shown as '?'. Applies to news, DX comments and
+        contest text.
+
+1.18.006  2026-07-22
+  [Change] Settings menu kept alphabetical — "ISS Frequencies" now sits between
+           "Distance Units" and "ISS Pass Alert" instead of at the bottom.
+
+1.18.005  2026-07-22
+  [Feature] Settings > "ISS Frequencies" — the SSTV, APRS and voice-repeater
+            input/output frequencies used by the Grey Line pass Doppler panel are
+            now user-configurable (they change over time). Tap a frequency to
+            open a digit spinner (DDD.DDD MHz, kHz resolution); values persist.
+            Defaults: SSTV 437.550, APRS 145.825, Repeater In 145.990,
+            Repeater Out 437.800.
+
+1.18.004  2026-07-22
+  [Feature] FT8 Spots band filter. Tap the band legend to open an options
+            screen listing every band with an ON/OFF state; tap a band to hide
+            or show it, tap outside to close. Hidden bands are removed from the
+            map (dots, lines, furthest/loudest, zoom) and dimmed in the legend
+            so it stays tappable even when everything is hidden. The selection
+            persists across reboots.
+
+1.18.003  2026-07-22
+  [Feature] Onboard green LED flashes on/off once a second while the ISS is
+            optically visible overhead (above the horizon, sunlit, and local
+            sky dark). Toggle it under Settings > "ISS Visible LED" (ON by
+            default). Uses the CYD's common-anode RGB LED green channel (GPIO16).
+
+1.18.002  2026-07-22
+  [Feature] Status bar navigation — added Rewind and Circle buttons between
+            Play/Pause and Fast Forward. Rewind steps back one screen (mirror of
+            Fast Forward); Circle opens a jump-to-screen menu listing every
+            enabled screen in a two-column grid — tap a screen to go straight to
+            it, tap elsewhere to dismiss. The current screen is highlighted.
+
+1.18.001  2026-07-22
+  [Change] PSK Reporter and FT8 Spots band legends now list bands sorted by
+           frequency, highest to lowest, instead of first-seen order.
+
 1.18.000  2026-07-21
   [Feature] FT8 Spots screen — map of DX stations heard by receivers in your
             grid square, sourced from PSK Reporter by receiverGrid. Tap the

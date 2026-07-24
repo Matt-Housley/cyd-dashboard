@@ -6,9 +6,21 @@
 
 static int8_t s_cxSelected = -1;
 
+/** @brief Clear any open contest-detail overlay (e.g. when leaving the screen). */
 void contestClearSelection() { s_cxSelected = -1; }
+/** @brief Whether a contest row is currently selected (detail overlay open).
+ *  @return true if a contest detail overlay is showing, false otherwise. */
 bool contestHasSelection()   { return s_cxSelected >= 0; }
 
+/**
+ * @brief Handle a tap on the Contests screen (finger-up).
+ *
+ * If the detail overlay is open, any tap dismisses it. Otherwise a tap on a
+ * contest row selects it and requests its detail fetch via g_contestDetailReq.
+ * @param x  Touch x in screen pixels (unused; rows span the full width).
+ * @param y  Touch y in screen pixels.
+ * @return true if the tap was consumed (selection changed), false if it missed.
+ */
 bool contestTouchUp(int32_t x, int32_t y) {
     if (s_cxSelected >= 0) {
         s_cxSelected = -1;
@@ -34,6 +46,9 @@ bool contestTouchUp(int32_t x, int32_t y) {
     return false;
 }
 
+/** @brief Draw the Contests screen: upcoming/active contest calendar rows with a
+ *         LIVE badge for in-progress events, plus a tap-to-open detail overlay
+ *         (mode/bands/exchange, loaded on demand). See screen_contests.h. */
 void drawScreenContests() {
     xSemaphoreTake(g_dataMutex, portMAX_DELAY);
     ContestData cd = g_contests;

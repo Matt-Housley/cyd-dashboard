@@ -6,6 +6,12 @@
 #include "fonts/ui_fonts.h"
 
 // ─── Band name from frequency (MHz as supplied by SOTA API) ───────────────────
+/**
+ * @brief Map a frequency (in MHz) to its amateur band name.
+ * @param MHz  Frequency in megahertz (as supplied by the SOTA API).
+ * @return A static band string ("40m", "2m", ...), or "??" if outside every
+ *         known amateur allocation.
+ */
 static const char* sotaFreqBand(float MHz) {
     if (MHz >=  1.8f   && MHz <   2.0f)  return "160m";
     if (MHz >=  3.5f   && MHz <   4.0f)  return  "80m";
@@ -25,6 +31,11 @@ static const char* sotaFreqBand(float MHz) {
 }
 
 // ─── Accent colour per band ────────────────────────────────────────────────────
+/**
+ * @brief Pick a distinctive accent colour for a band name.
+ * @param b  Band string as returned by sotaFreqBand(); may be null/empty.
+ * @return An RGB888 colour; COL_GREY for null/empty, COL_GREY_L for unrecognised.
+ */
 static uint32_t sotaBandColor(const char* b) {
     if (!b || !b[0]) return COL_GREY;
     switch (b[0]) {
@@ -52,6 +63,9 @@ static uint32_t sotaBandColor(const char* b) {
 }
 
 // ─── Main draw function ────────────────────────────────────────────────────────
+/** @brief Draw the SOTA Spots screen: recent Summits-on-the-Air activator spots
+ *         (respecting the mode filter) with band-coloured rows, summit
+ *         reference/name, and distance or time. See screen_sota.h. */
 void drawScreenSOTA() {
     xSemaphoreTake(g_dataMutex, portMAX_DELAY);
     SOTASpotsData ds = g_sotaSpots;

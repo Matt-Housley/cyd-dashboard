@@ -3,6 +3,7 @@
 #include <freertos/semphr.h>
 
 // ─── Weather ──────────────────────────────────────────────────────────────────
+/** @brief One day's forecast row within WeatherData. */
 struct DayForecast {
     char     day[4];      // "Mon"
     uint8_t  code;
@@ -13,6 +14,7 @@ struct DayForecast {
     uint16_t windDir;     // dominant wind direction, degrees (0=N, 90=E, 180=S, 270=W)
 };
 
+/** @brief Current conditions + 7-day forecast for the Weather screen (g_weather). */
 struct WeatherData {
     bool     valid     = false;
     int8_t   temp      = 0;
@@ -27,12 +29,15 @@ struct WeatherData {
 };
 
 // ─── Solar / HF propagation ───────────────────────────────────────────────────
+/** @brief Day/night HF condition for one amateur band within SolarData. */
 struct BandCond {
     char band[5];       // "20m"
     char day[12];       // "Good"
     char night[12];     // "Fair"
 };
 
+/** @brief Solar indices + per-band HF conditions for the HF/Propagation screens
+ *         (g_solar). */
 struct SolarData {
     bool  valid        = false;
     int   sfi          = 0;
@@ -47,11 +52,13 @@ struct SolarData {
 };
 
 // ─── News ─────────────────────────────────────────────────────────────────────
+/** @brief One news headline and its thumbnail URL. */
 struct NewsItem {
     char title[100];
     char thumbUrl[160];
 };
 
+/** @brief A news feed's items for the BBC/Apple screens (g_bbcNews/g_appleNews). */
 struct NewsData {
     bool     valid = false;
     NewsItem items[4];   // screens show 1 hero + 3 sub-rows = 4 max
@@ -61,6 +68,7 @@ struct NewsData {
 // ─── Stock / index ────────────────────────────────────────────────────────────
 #define TRACKER_POINTS 220
 
+/** @brief Current price + weekly history for the Stocks Tracker screen (g_tracker). */
 struct TrackerData {
     bool    valid     = false;
     float   price     = 0.0f;
@@ -71,6 +79,8 @@ struct TrackerData {
 };
 
 // ─── ISS position + upcoming orbit track ─────────────────────────────────────
+/** @brief ISS position, predicted ground track, next-pass details, and orbital
+ *         propagation parameters for the Grey Line screen (g_iss). */
 struct ISSData {
     bool  valid      = false;
     float lat        = 0.0f;
@@ -108,6 +118,7 @@ struct ISSData {
 // screen shows "what DX is being heard near me right now."
 #define DX_SPOTS_MAX 5
 
+/** @brief One DX-cluster spot (spotted station, spotter, frequency, distances). */
 struct DXSpot {
     char     dx[12];       // spotted (DX) callsign,  e.g. "VK9DX"
     char     spotter[12];  // spotter callsign,        e.g. "G4ZFE"
@@ -119,6 +130,7 @@ struct DXSpot {
     uint16_t dx_bearing;   // bearing to DX (degrees 0–359); 0xFFFF = unknown
 };
 
+/** @brief DX spots for the DX Spots screen, nearest first (g_dxSpots). */
 struct DXSpotsData {
     bool    valid = false;
     DXSpot  spots[DX_SPOTS_MAX];
@@ -130,6 +142,7 @@ struct DXSpotsData {
 // The API returns full lat/lon per spot, so distance is calculated directly.
 #define POTA_SPOTS_MAX 5
 
+/** @brief One Parks-on-the-Air activator spot (park reference/name + distance). */
 struct POTASpot {
     char     activator[14];  // activator callsign, e.g. "DL/HB9XQH"
     char     reference[10];  // park reference,     e.g. "DE-0421"
@@ -140,6 +153,7 @@ struct POTASpot {
     uint16_t dist_km;        // distance from QTH in km; 0 = unknown
 };
 
+/** @brief POTA spots for the POTA Spots screen, nearest first (g_potaSpots). */
 struct POTASpotsData {
     bool     valid = false;
     POTASpot spots[POTA_SPOTS_MAX];
@@ -151,6 +165,7 @@ struct POTASpotsData {
 // distance is estimated from the activator callsign prefix via pfxToLatLon().
 #define SOTA_SPOTS_MAX 5
 
+/** @brief One Summits-on-the-Air activator spot (summit reference/name + distance). */
 struct SOTASpot {
     char     activator[14];  // activator callsign,  e.g. "HB9TNF/P"
     char     summit[12];     // summit reference,    e.g. "HB/SZ-018"
@@ -161,6 +176,7 @@ struct SOTASpot {
     uint16_t dist_km;        // approx distance from QTH; 0 = unknown
 };
 
+/** @brief SOTA spots for the SOTA Spots screen, nearest first (g_sotaSpots). */
 struct SOTASpotsData {
     bool     valid = false;
     SOTASpot spots[SOTA_SPOTS_MAX];
@@ -173,6 +189,7 @@ struct SOTASpotsData {
 // keeping the highest-SNR report per sender.
 #define FT8_SPOTS_MAX 50
 
+/** @brief One deduplicated FT8 DX station heard by a nearby receiver. */
 struct FT8Spot {
     char   senderCall[14];  // DX station callsign
     char   senderGrid[8];   // DX station Maidenhead locator
@@ -183,6 +200,7 @@ struct FT8Spot {
     char   rxCall[14];      // callsign of local receiver with best SNR
 };
 
+/** @brief FT8 spots for the FT8 Spots screen (g_ft8Spots). */
 struct FT8SpotsData {
     bool      valid       = false;
     bool      fetchFailed = false;
@@ -199,6 +217,7 @@ extern FT8SpotsData g_ft8Spots;
 // PSK_REPORTS_MAX unique stations are stored.
 #define PSK_REPORTS_MAX 50
 
+/** @brief One station that received our callsign (PSK Reporter). */
 struct PSKReport {
     char   call[14];    // receiver callsign
     char   grid[8];     // receiver Maidenhead locator
@@ -208,6 +227,7 @@ struct PSKReport {
     int8_t snr;         // SNR in dB
 };
 
+/** @brief Reception reports for the PSK Reporter screen (g_pskData). */
 struct PSKData {
     bool      valid = false;
     bool      fetchFailed = false;  // BISECT: keeping, only 1 byte
@@ -221,6 +241,7 @@ struct PSKData {
 // Active contests (now within start–end window) are shown first, then upcoming.
 #define CONTEST_MAX 8
 
+/** @brief One contest calendar entry (name, time window, active flag). */
 struct Contest {
     char  name[42];     // contest title, truncated to fit
     char  times[36];    // raw description, e.g. "0000Z, May 30 to 2359Z, May 31"
@@ -228,12 +249,15 @@ struct Contest {
     char  ref[16];      // contestcalendar.com detail ref param
 };
 
+/** @brief Contests for the Contests screen, active first (g_contests). */
 struct ContestData {
     bool    valid = false;
     Contest items[CONTEST_MAX];
     uint8_t count = 0;
 };
 
+/** @brief On-demand detail (mode/bands/exchange) for a tapped contest
+ *         (g_contestDetail). */
 struct ContestDetail {
     bool  valid;
     bool  failed;
@@ -247,6 +271,7 @@ extern ContestDetail    g_contestDetail;
 extern volatile int8_t  g_contestDetailReq;
 
 // ─── Timezone auto-detect (looked up from Open-Meteo on location save) ───────
+/** @brief Result of an auto-detect-timezone lookup (g_tzLookup). */
 struct TzLookupResult {
     bool  valid  = false;   // result ready (success or failure)
     bool  failed = false;   // true = lookup failed or no match found
@@ -262,6 +287,7 @@ extern volatile float   g_tzLookupLon;
 // ─── Fetch state tracking ─────────────────────────────────────────────────────
 // Written by the fetch task, read by the main loop for status reporting.
 // Individual uint8_t writes on a 32-bit CPU are atomic, so no mutex needed.
+/** @brief Per-source fetch status (written by the fetch task, read by the loop). */
 enum FetchState : uint8_t {
     FS_IDLE   = 0,  // never attempted since boot
     FS_ACTIVE,      // fetch is currently running
@@ -269,6 +295,7 @@ enum FetchState : uint8_t {
     FS_FAIL,        // last fetch failed (all retries exhausted)
 };
 
+/** @brief Index of each data source into the g_fetchState array. */
 enum FetchSrc : uint8_t {
     FSRC_WEATHER = 0,
     FSRC_SOLAR,

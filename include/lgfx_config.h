@@ -35,6 +35,13 @@
 
 
 
+/**
+ * @brief LovyanGFX device for the Cheap Yellow Display (ILI9341 + XPT2046).
+ *
+ * Wires up the display on HSPI, the PWM backlight, and the XPT2046 touch panel.
+ * The touch is deliberately software bit-banged (spi_host = -1) so the VSPI
+ * hardware peripheral stays free for the SD card (see the touch config below).
+ */
 class LGFX : public lgfx::LGFX_Device
 {
     lgfx::Panel_ILI9341  _panel_instance;
@@ -43,6 +50,7 @@ class LGFX : public lgfx::LGFX_Device
     lgfx::Touch_XPT2046  _touch_instance;
 
 public:
+    /** @brief Construct and configure the display bus, panel, backlight, and touch. */
     LGFX(void)
     {
         {   // SPI bus – display (HSPI)
@@ -111,7 +119,11 @@ public:
             //cfg.offset_rotation = 5;    //  0,0 top right. X & Y swapped.
             cfg.offset_rotation = 0;
             //cfg.offset_rotation = 7;    //  0,0 bottom left. X & Y swapped.
-            cfg.spi_host        = VSPI_HOST;
+            // spi_host = -1 → LovyanGFX bit-bangs the touch in software, leaving
+            // the VSPI hardware peripheral free for the SD card (which is wired to
+            // the VSPI pins 18/19/23/5). Touch is low-bandwidth, so bit-banging is
+            // fine; this is how the SD screenshot feature can coexist with touch.
+            cfg.spi_host        = -1;
             cfg.freq            = 2500000;
             cfg.pin_sclk        = 25;
             cfg.pin_mosi        = 32;

@@ -9,8 +9,19 @@
 // ─── Tap-to-info overlay state ────────────────────────────────────────────────
 static int8_t   s_hfSelected = -1;   // index into tiles[], -1 = none
 
+/** @brief Whether the tap-to-info overlay is currently showing an index tile.
+ *  @return true if an index tile is selected/expanded, false otherwise. */
 bool hfNowHasSelection() { return s_hfSelected >= 0; }
 
+/**
+ * @brief Handle a tap on the HF Now screen (finger-up).
+ *
+ * If the info overlay is open, any tap dismisses it. Otherwise a tap on one of
+ * the five index tiles opens that tile's explanation overlay.
+ * @param x  Touch x in screen pixels.
+ * @param y  Touch y in screen pixels.
+ * @return true if the tap was consumed (selection changed), false if it missed.
+ */
 bool hfNowTouchUp(int32_t x, int32_t y) {
     const int tileW = 58, tileH = 40;
     // tileGap must match drawScreenHFNow — computed the same way
@@ -39,7 +50,11 @@ bool hfNowTouchUp(int32_t x, int32_t y) {
 static uint32_t s_entryTime  = 0;
 static uint32_t s_lastCallMs = 0;
 
-// Cubic ease-out: fast start, decelerates to a stop
+/**
+ * @brief Cubic ease-out easing (fast start, decelerating to a stop).
+ * @param t  Normalised time; clamped to [0,1].
+ * @return Eased value in [0,1].
+ */
 static inline float easeOutCubic(float t) {
     if (t >= 1.0f) return 1.0f;
     if (t <= 0.0f) return 0.0f;
@@ -47,6 +62,10 @@ static inline float easeOutCubic(float t) {
     return 1.0f - u * u * u;
 }
 
+/** @brief Draw the HF Now screen: the five solar indices as coloured tiles, a
+ *         day/night band-condition bar chart (with a staggered grow-in
+ *         animation), and a tap-to-info overlay explaining each index.
+ *         See screen_hf_now.h. */
 void drawScreenHFNow() {
     // Detect screen entry: if more than 500 ms have passed since the last draw
     // call, the screen was just navigated to — reset the animation clock.

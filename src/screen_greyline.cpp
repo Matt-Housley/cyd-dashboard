@@ -8,7 +8,12 @@
 #include "fonts/ui_fonts.h"
 
 // ─── ISS illumination helpers ────────────────────────────────────────────────
-// Compute subsolar longitude (degrees) and declination (radians) at a given UTC time.
+/**
+ * @brief Compute the subsolar point at a given time.
+ * @param t              UTC time to evaluate.
+ * @param[out] sunLonDeg Receives the subsolar longitude in degrees.
+ * @param[out] sunDecl   Receives the solar declination in radians.
+ */
 static void sunPosAt(time_t t, float& sunLonDeg, float& sunDecl) {
     struct tm utm; gmtime_r(&t, &utm);
     float utcH = utm.tm_hour + utm.tm_min / 60.0f + utm.tm_sec / 3600.0f;
@@ -20,7 +25,13 @@ static void sunPosAt(time_t t, float& sunLonDeg, float& sunDecl) {
                - 0.002697f * cosf(3*B) + 0.001480f * sinf(3*B);
 }
 
-// Sun elevation in degrees at (lat, lon) given precomputed sun position.
+/**
+ * @brief Solar elevation angle at a location, given a precomputed sun position.
+ * @param lat,lon    Observer latitude/longitude in degrees.
+ * @param sunLonDeg  Subsolar longitude in degrees (from sunPosAt()).
+ * @param sunDecl    Solar declination in radians (from sunPosAt()).
+ * @return Sun elevation in degrees (negative when the sun is below the horizon).
+ */
 static float sunElevAt(float lat, float lon, float sunLonDeg, float sunDecl) {
     float latR = lat * (float)M_PI / 180.0f;
     float dLon = (lon - sunLonDeg) * (float)M_PI / 180.0f;
@@ -28,13 +39,38 @@ static float sunElevAt(float lat, float lon, float sunLonDeg, float sunDecl) {
            * 180.0f / (float)M_PI;
 }
 
-// True when the ISS at (issLat, issLon) is in sunlight (not in Earth's shadow).
-// Threshold: cos(angle ISS–sun) > -RE/(RE+408 km) ≈ -0.9398
+/**
+ * @brief Whether the ISS subpoint is sunlit (not in Earth's shadow).
+ *
+ * Uses the threshold cos(ISS–sun angle) > -RE/(RE+408 km) ≈ -0.9398.
+ * @param issLat,issLon  ISS ground-track latitude/longitude in degrees.
+ * @param sunLonDeg      Subsolar longitude in degrees (from sunPosAt()).
+ * @param sunDecl        Solar declination in radians (from sunPosAt()).
+ * @return true if the ISS is in sunlight, false if in shadow.
+ */
 static bool issIsSunlit(float issLat, float issLon, float sunLonDeg, float sunDecl) {
     float latR = issLat * (float)M_PI / 180.0f;
     float dLon = (issLon - sunLonDeg) * (float)M_PI / 180.0f;
     float cosRho = sinf(latR)*sinf(sunDecl) + cosf(latR)*cosf(sunDecl)*cosf(dLon);
     return cosRho > -0.9398f;
+}
+
+/**
+ * @brief Whether the ISS is optically visible from an observer (see screen_greyline.h).
+ *
+ * Requires the ISS to be sunlit while the observer's sky is dark (sun below the
+ * horizon), matching the "Sunlit, dark sky/twilight" pass-card cases.
+ * @param issLat,issLon  ISS ground-track latitude/longitude in degrees.
+ * @param obsLat,obsLon  Observer latitude/longitude in degrees.
+ * @param t              Time to evaluate.
+ * @return true if the ISS would be visible to the naked eye, else false.
+ */
+bool issOpticallyVisible(float issLat, float issLon,
+                         float obsLat, float obsLon, time_t t) {
+    float sLonDeg, sDecl;
+    sunPosAt(t, sLonDeg, sDecl);
+    if (!issIsSunlit(issLat, issLon, sLonDeg, sDecl)) return false;   // in Earth's shadow
+    return sunElevAt(obsLat, obsLon, sLonDeg, sDecl) < 0.0f;          // observer sky dark
 }
 
 // ─── Map parameters ───────────────────────────────────────────────────────────
@@ -49,9 +85,13 @@ static float g_mapLonRng = 360.0f;
 static float g_mapLatTop = 75.0f;
 static float g_mapLatRng = 138.0f;
 
+/** @brief Project a longitude to a screen x using the current map bounds.
+ *  @param lon  Longitude in degrees. @return Screen x in pixels. */
 static inline int lonToX(float lon) {
     return (int)((lon - g_mapLonMin) / g_mapLonRng * MAP_W);
 }
+/** @brief Project a latitude to a screen y using the current map bounds.
+ *  @param lat  Latitude in degrees. @return Screen y in pixels. */
 static inline int latToY(float lat) {
     return MAP_Y0 + (int)((g_mapLatTop - lat) / g_mapLatRng * MAP_H);
 }
@@ -607,6 +647,13 @@ static const int16_t WORLD_MAP[] PROGMEM = {
 };
 
 // ─── Scanline polygon fill + outline ─────────────────────────────────────────
+/**
+ * @brief Fill and outline a polygon using scanline rasterisation.
+ * @param px,py    Vertex x/y screen coordinates (parallel arrays of length @p n).
+ * @param n        Vertex count; the function is a no-op if n < 3.
+ * @param fillCol  Interior fill colour (already packed to the sprite's format).
+ * @param edgeCol  Outline colour (already packed).
+ */
 static void fillPolygon(const int* px, const int* py, int n,
                         uint32_t fillCol, uint32_t edgeCol) {
     if (n < 3) return;
@@ -645,6 +692,8 @@ static void fillPolygon(const int* px, const int* py, int n,
 
 static void drawWorldMapImpl();
 
+/** @brief Draw the full-globe world map (lon -180..180, lat -63..75).
+ *         See screen_greyline.h. */
 void drawWorldMap() {
     g_mapLonMin = -180.0f;
     g_mapLonRng = 360.0f;
@@ -653,6 +702,8 @@ void drawWorldMap() {
     drawWorldMapImpl();
 }
 
+/** @brief Draw the world map zoomed to the given bounds (see screen_greyline.h).
+ *         Callers are responsible for matching the screen aspect ratio. */
 void drawWorldMapZoomed(float lonMin, float lonMax, float latMin, float latMax) {
     g_mapLonMin = lonMin;
     g_mapLonRng = lonMax - lonMin;
@@ -661,6 +712,13 @@ void drawWorldMapZoomed(float lonMin, float lonMax, float latMin, float latMax) 
     drawWorldMapImpl();
 }
 
+/**
+ * @brief Render the world map at the current projection bounds.
+ *
+ * Draws day/night ocean shading, graticule, filled continents, night-side land
+ * stipple, the solar terminator (grey line), the subsolar sun dot, and the QTH
+ * marker. Uses the g_map* projection statics set by the drawWorldMap* wrappers.
+ */
 static void drawWorldMapImpl() {
     // ── Compute sun position (needed for day/night fill and terminator) ────────
     time_t rawNow = time(nullptr);
@@ -787,6 +845,11 @@ static void drawWorldMapImpl() {
     spr.print(g_settings.grid);
 }
 
+/** @brief Draw the Grey Line / ISS Tracker screen: the world map (auto-zoomed to
+ *         frame the ISS and QTH during a pass), the ISS marker and dashed orbit
+ *         track, a UTC clock, and a next-pass / live-pass info box with real-time
+ *         az/el and a Doppler-corrected radio frequency panel.
+ *         See screen_greyline.h. */
 void drawScreenGreyLine() {
     // When ISS is visible, zoom in to frame both ISS and QTH.
     {
@@ -997,11 +1060,10 @@ void drawScreenGreyLine() {
 
         spr.setFont(UI_FONT_9);
 
-        // degW: pixel width of "N°" where the circle adds 5px past the number text
-        // (gap 1 + circle radius 2 + cursor advance 2 = 5)
+        // degW: pixel width of "N°" using the real degree glyph (U+00B0)
         auto degW = [&](int val) -> int {
-            char nb[8]; snprintf(nb, sizeof(nb), "%d", val);
-            return spr.textWidth(nb) + 5;
+            char nb[10]; snprintf(nb, sizeof(nb), "%d\xC2\xB0", val);
+            return spr.textWidth(nb);
         };
 
         if (!iss2.passValid) {
@@ -1143,15 +1205,11 @@ void drawScreenGreyLine() {
             spr.fillRect(BX, BY, BW, BH, spr.color888(8, 10, 22));
             spr.drawRect(BX, BY, BW, BH, borderCol);
 
-            // Helper: print integer + drawn degree circle
+            // Helper: print integer + degree glyph (U+00B0, "\xC2\xB0")
             auto printDeg = [&](int val, uint32_t col) {
-                char nb[8]; snprintf(nb, sizeof(nb), "%d", val);
+                char nb[10]; snprintf(nb, sizeof(nb), "%d\xC2\xB0", val);
                 spr.setTextColor(col);
                 spr.print(nb);
-                int cx2 = spr.getCursorX() + 1;
-                int cy2 = spr.getCursorY() + 1;
-                spr.drawCircle(cx2, cy2, 2, col);
-                spr.setCursor(cx2 + 4, spr.getCursorY());
             };
 
             int ty = BY + PAD;
@@ -1222,11 +1280,12 @@ void drawScreenGreyLine() {
 
             // ── Doppler frequency panel (right side, live pass only) ──────────
             if (iss2.passNow) {
-                // Nominal frequencies in MHz
-                static const float FREQ_SSTV_DN = 437.550f;
-                static const float FREQ_APRS_DN = 145.825f;
-                static const float FREQ_RPT_DN  = 437.800f;
-                static const float FREQ_RPT_UP  = 145.990f;
+                // Nominal frequencies in MHz — user-configurable in Settings,
+                // since the ISS SSTV/APRS/repeater allocations change over time.
+                const float FREQ_SSTV_DN = g_settings.issFreqSstv;
+                const float FREQ_APRS_DN = g_settings.issFreqAprs;
+                const float FREQ_RPT_DN  = g_settings.issFreqRptOut;   // repeater output = downlink
+                const float FREQ_RPT_UP  = g_settings.issFreqRptIn;    // repeater input  = uplink
 
                 // c = 299792.458 km/s; v_r positive = approaching
                 const float INV_C = 1.0f / 299792.458f;

@@ -4,15 +4,64 @@
 #include "data_store.h"
 #include "settings.h"
 #include <math.h>
+#include "service.h"
 #include "fonts/ui_fonts.h"
+
+// ─── Lightning alert state ────────────────────────────────────────────────────
+static bool s_lightningAcked = false;                 // red LED silenced by tap
+static int  s_alertX = -1, s_alertY, s_alertW, s_alertH;   // alert-box hit rect
+
+/**
+ * @brief Whether a thunderstorm is forecast within the next hour.
+ *
+ * True when g_weather.lightningHours is 0 or 1, or when a fake alert is staged
+ * from the Service menu (g_fakeLightning). Re-arms the tap-to-silence
+ * acknowledgement whenever the alert clears.
+ * @return true if a lightning alert should be active this frame.
+ */
+bool weatherLightningSoon() {
+    if (g_fakeLightning) return true;   // Service menu: staged lightning alert
+    xSemaphoreTake(g_dataMutex, portMAX_DELAY);
+    int8_t lh = g_weather.valid ? g_weather.lightningHours : -1;
+    xSemaphoreGive(g_dataMutex);
+    bool soon = (lh >= 0 && lh <= 1);
+    if (!soon) s_lightningAcked = false;
+    return soon;
+}
+/** @brief Whether the user has tapped the alert box to silence the red LED.
+ *  @return true if the current lightning alert has been acknowledged. */
+bool weatherLightningAcked() { return s_lightningAcked; }
+
+/**
+ * @brief Handle a tap on the Weather screen (finger-up).
+ *
+ * A tap inside the lightning-alert box acknowledges it, silencing the flashing
+ * red LED (the warning box itself remains visible).
+ * @param x  Touch x in screen pixels.
+ * @param y  Touch y in screen pixels.
+ * @return true if the alert box was tapped and acknowledged, false otherwise.
+ */
+bool weatherTouchUp(int32_t x, int32_t y) {
+    if (s_alertX >= 0 &&
+        x >= s_alertX && x < s_alertX + s_alertW &&
+        y >= s_alertY && y < s_alertY + s_alertH) {
+        s_lightningAcked = true;   // silence the red LED (box stays as a warning)
+        return true;
+    }
+    return false;
+}
 
 // ─── Wind direction helpers ───────────────────────────────────────────────────
 
-// Draws a full-length directional arrow centred at (cx,cy).
-// The shaft runs from TAIL to TIP (total length = 2 × r px), which fills the
-// wind-row height and is twice as visible as a centre→tip half-arrow.
-// r=5 keeps the tip safely inside the tile border for all eight cardinal
-// directions (worst case: due-south tip at cy+5, tile border at cy+7).
+/**
+ * @brief Draw a full-length wind-direction arrow centred at (cx,cy).
+ *
+ * The shaft runs tail→tip (total length 2×r px) pointing in the wind's
+ * "flowing-to" direction, with barbs at the tip.
+ * @param cx,cy    Arrow centre in screen pixels.
+ * @param windDeg  Wind direction in degrees (0 = up/north, clockwise).
+ * @param col      Arrow colour (already packed to the sprite's format).
+ */
 static void drawWindArrow(int cx, int cy, uint16_t windDeg, uint32_t col) {
     const float r  = 5.0f;   // half-length; total shaft = 10 px ≈ DejaVu9 height
     const float br = 3.0f;   // arrowhead barb length
@@ -37,6 +86,11 @@ static void drawWindArrow(int cx, int cy, uint16_t windDeg, uint32_t col) {
 }
 
 // ─── WMO code helpers ─────────────────────────────────────────────────────────
+/**
+ * @brief Map a WMO weather-interpretation code to a short label.
+ * @param code  WMO code as supplied by Open-Meteo (0–99).
+ * @return A static label such as "Clear sky", "Rain", or "Thunderstorm".
+ */
 static const char* wmoLabel(uint8_t code) {
     if (code == 0)  return "Clear sky";
     if (code <= 2)  return "Partly cloudy";
@@ -51,6 +105,12 @@ static const char* wmoLabel(uint8_t code) {
 }
 
 // ─── Weather icon drawing ─────────────────────────────────────────────────────
+/**
+ * @brief Draw a filled cloud shape (three circles plus a connecting rectangle).
+ * @param cx,cy  Cloud centre in screen pixels.
+ * @param r      Nominal cloud radius in pixels (overall size scales with this).
+ * @param col    Fill colour (already packed to the sprite's format).
+ */
 static void drawCloudShape(int cx, int cy, int r, uint32_t col) {
     int r2 = r * 2 / 3;
     spr.fillCircle(cx,        cy,       r2,  col);
@@ -61,7 +121,16 @@ static void drawCloudShape(int cx, int cy, int r, uint32_t col) {
     spr.fillRect(cx - r*2/3, cy + r/4, r*4/3, r/3, col);
 }
 
-// t = millis(), used to drive frame-by-frame animations.
+/**
+ * @brief Draw an animated weather icon for a WMO code.
+ *
+ * Selects and renders one animated glyph (rotating sun, drifting cloud, falling
+ * rain/snow, lightning flash, etc.) matching the condition.
+ * @param cx,cy  Icon centre in screen pixels.
+ * @param r      Icon radius in pixels (draws scale with this).
+ * @param code   WMO weather code (0–99).
+ * @param t      Animation clock in milliseconds (typically millis()).
+ */
 static void drawWeatherIcon(int cx, int cy, int r, uint8_t code, uint32_t t) {
     uint32_t sunC   = spr.color888(255, 200, 0);
     uint32_t cloudC = spr.color888(160, 160, 185);
@@ -176,6 +245,11 @@ static void drawWeatherIcon(int cx, int cy, int r, uint8_t code, uint32_t t) {
 }
 
 // ─── Screen ───────────────────────────────────────────────────────────────────
+/** @brief Draw the Weather screen: large current temperature (°C/°F per
+ *         settings), condition, humidity/wind/rain/lightning stats, an animated
+ *         condition icon, a tap-to-silence lightning-alert banner, and a 7-day
+ *         forecast strip with temperature-range bars and wind arrows.
+ *         See screen_weather.h. */
 void drawScreenWeather() {
     xSemaphoreTake(g_dataMutex, portMAX_DELAY);
     WeatherData wd = g_weather;
@@ -202,14 +276,11 @@ void drawScreenWeather() {
     spr.setCursor(6, tempTop);
     spr.print(tbuf);
 
-    // Degree circle + "C" or "F"
-    int degX = 6 + tempW + 6;
-    int degY = tempTop + 10;
-    spr.drawCircle(degX, degY, 3, C(COL_GREY_L));
+    // Degree symbol + "C"/"F" — "\xC2\xB0" is U+00B0, now a real glyph in DejaVu18
     spr.setFont(UI_FONT_18);
     spr.setTextColor(C(COL_GREY_L));
-    spr.setCursor(degX + 7, tempTop + 8);
-    spr.print(g_settings.useCelsius ? "C" : "F");
+    spr.setCursor(6 + tempW + 6, tempTop + 8);
+    spr.print(g_settings.useCelsius ? "\xC2\xB0" "C" : "\xC2\xB0" "F");
 
     // ── Current condition label ───────────────────────────────────────────────
     spr.setFont(UI_FONT_12);
@@ -254,6 +325,32 @@ void drawScreenWeather() {
     drawWeatherIcon(284, iconCY, 20, wd.code, t);
 
     y += 66;
+
+    // ── Lightning alert banner (only when thunder is due within the hour) ──────
+    if (weatherLightningSoon()) {
+        const int BH = 30;
+        s_alertX = 4; s_alertY = y; s_alertW = SCREEN_W - 8; s_alertH = BH;
+        spr.fillRoundRect(s_alertX, y, s_alertW, BH, 3, C(0xC62828UL));
+        spr.drawRoundRect(s_alertX, y, s_alertW, BH, 3, C(0xFF5252UL));
+
+        spr.setFont(UI_FONT_12);
+        spr.setTextColor(C(COL_WHITE));
+        const char* msg = "! LIGHTNING ALERT !";
+        spr.setCursor((SCREEN_W - spr.textWidth(msg)) / 2, y + 4);
+        spr.print(msg);
+
+        spr.setFont(UI_FONT_9);
+        bool acked = weatherLightningAcked();
+        const char* hint = acked ? "LED silenced" : "Tap to silence LED";
+        spr.setTextColor(acked ? spr.color888(255, 190, 190) : C(COL_WHITE));
+        spr.setCursor((SCREEN_W - spr.textWidth(hint)) / 2, y + 17);
+        spr.print(hint);
+
+        y += BH + 4;
+    } else {
+        s_alertX = -1;   // no box this frame
+    }
+
     spr.drawFastHLine(4, y, SCREEN_W - 8, C(COL_BORDER));
     y += 4;
 
@@ -282,7 +379,10 @@ void drawScreenWeather() {
     // Bar geometry (tile-relative offsets).
     // Reduced by 8 px vs original to make room for the wind row at the bottom.
     const int barRelTop = 48;   // px from tile top
-    const int barRelBot = 100;  // px from tile top  → 52 px tall (was 108/60)
+    // Bar bottom anchored 37 px above the tile bottom (room for min-temp, precip
+    // and wind rows). Equals 100 at full height; shrinks if the lightning banner
+    // has pushed the forecast down, keeping the bottom rows on-screen.
+    const int barRelBot = tileH - 37;
     const int barTotalH = barRelBot - barRelTop;
     const int barW      = 6;
 
@@ -306,13 +406,12 @@ void drawScreenWeather() {
         int dispMaxT = g_settings.useCelsius ? d.maxT : (int)(d.maxT * 9.0f / 5.0f + 32.0f);
         spr.setFont(UI_FONT_9);
         spr.setTextColor(C(COL_WHITE));
-        char maxbuf[8];
-        snprintf(maxbuf, sizeof(maxbuf), "%d", dispMaxT);
-        int mw   = spr.textWidth(maxbuf) + 5;   // +5 for degree circle
+        char maxbuf[10];
+        snprintf(maxbuf, sizeof(maxbuf), "%d\xC2\xB0", dispMaxT);   // \xC2\xB0 = U+00B0
+        int mw   = spr.textWidth(maxbuf);
         int mxOff = cx + (colW - 2 - mw) / 2;
         spr.setCursor(mxOff, y + 37);
         spr.print(maxbuf);
-        spr.drawCircle(mxOff + spr.textWidth(maxbuf) + 2, y + 38, 2, C(COL_WHITE));
 
         // ── Temperature bar ───────────────────────────────────────────────────
         int bx      = cx + (colW - 2 - barW) / 2;
@@ -337,13 +436,12 @@ void drawScreenWeather() {
         int dispMinT = g_settings.useCelsius ? d.minT : (int)(d.minT * 9.0f / 5.0f + 32.0f);
         spr.setFont(UI_FONT_9);
         spr.setTextColor(C(COL_GREY));
-        char minbuf[8];
-        snprintf(minbuf, sizeof(minbuf), "%d", dispMinT);
-        int mnw   = spr.textWidth(minbuf) + 5;
+        char minbuf[10];
+        snprintf(minbuf, sizeof(minbuf), "%d\xC2\xB0", dispMinT);   // \xC2\xB0 = U+00B0
+        int mnw   = spr.textWidth(minbuf);
         int mnOff = cx + (colW - 2 - mnw) / 2;
-        spr.setCursor(mnOff, y + 102);
+        spr.setCursor(mnOff, y + barRelBot + 2);
         spr.print(minbuf);
-        spr.drawCircle(mnOff + spr.textWidth(minbuf) + 2, y + 103, 2, C(COL_GREY));
 
         // Precipitation (optional, moved up 8 px)
         if (d.precip >= 0.1f) {
@@ -353,7 +451,7 @@ void drawScreenWeather() {
                      d.precip < 10.0f ? "%.1f" : "%.0f", d.precip);
             strlcat(pbuf, "mm", sizeof(pbuf));
             int pw = spr.textWidth(pbuf);
-            spr.setCursor(cx + (colW - 2 - pw) / 2, y + 114);
+            spr.setCursor(cx + (colW - 2 - pw) / 2, y + barRelBot + 14);
             spr.print(pbuf);
         }
 
@@ -362,7 +460,7 @@ void drawScreenWeather() {
         // "widget" width ≈ 9 px (arrow) + 3 px gap + up to 18 px (speed) = 30 px.
         {
             uint32_t windCol  = C(COL_GREY);
-            const int windTextY = y + 124;          // top of DejaVu9 text row
+            const int windTextY = y + barRelBot + 24; // top of DejaVu9 text row
             const int windCY    = windTextY + 6;    // vertical centre for arrow
 
             char wsBuf[6];

@@ -6,6 +6,12 @@
 #include "fonts/ui_fonts.h"
 
 // ─── Band name from frequency (kHz) ───────────────────────────────────────────
+/**
+ * @brief Map a frequency (in kHz) to its amateur band name.
+ * @param kHz  Frequency in kilohertz.
+ * @return A static band string ("40m", "20m", ...), or "??" if outside every
+ *         known amateur allocation.
+ */
 static const char* potaFreqBand(float kHz) {
     if (kHz >=  1800 && kHz <  2000) return "160m";
     if (kHz >=  3500 && kHz <  4000) return  "80m";
@@ -25,6 +31,11 @@ static const char* potaFreqBand(float kHz) {
 }
 
 // ─── Accent colour per band ────────────────────────────────────────────────────
+/**
+ * @brief Pick a distinctive accent colour for a band name.
+ * @param b  Band string as returned by potaFreqBand(); may be null/empty.
+ * @return An RGB888 colour; COL_GREY for null/empty, COL_GREY_L for unrecognised.
+ */
 static uint32_t potaBandColor(const char* b) {
     if (!b || !b[0]) return COL_GREY;
     switch (b[0]) {
@@ -52,6 +63,9 @@ static uint32_t potaBandColor(const char* b) {
 }
 
 // ─── Main draw function ────────────────────────────────────────────────────────
+/** @brief Draw the POTA Spots screen: recent Parks-on-the-Air activator spots
+ *         (respecting the mode filter) with band-coloured rows, park
+ *         reference/name, and distance or time. See screen_pota.h. */
 void drawScreenPOTA() {
     xSemaphoreTake(g_dataMutex, portMAX_DELAY);
     POTASpotsData ds = g_potaSpots;

@@ -4,6 +4,9 @@
 #include "data_store.h"
 #include "fonts/ui_fonts.h"
 
+/** @brief Draw the Propagation screen: geomagnetic state and per-band day/night
+ *         HF conditions from g_solar, with an SFI/SSN/A/K/X-ray footer.
+ *         See screen_propagation.h. */
 void drawScreenPropagation() {
     xSemaphoreTake(g_dataMutex, portMAX_DELAY);
     SolarData sd = g_solar;

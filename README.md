@@ -1,6 +1,6 @@
 # CYD Dashboard
 
-A multi-screen information dashboard for the ESP32 Cheap Yellow Display (CYD), built with PlatformIO and LovyanGFX. Designed primarily for amateur radio operators, it also displays weather, news, and financial data.
+A multi-screen information dashboard for the ESP32 "Cheap Yellow Display" (CYD / ESP32-2432S028), built with PlatformIO and LovyanGFX. Designed primarily for amateur (ham) radio operators, it also displays weather, news, and financial data.
 
 See [History.txt](History.txt) for the full version history and changelog.
 
@@ -17,7 +17,7 @@ See [History.txt](History.txt) for the full version history and changelog.
 | ![SOTA Spots](screenshots/SOTASpots.jpg) | ![Contests](screenshots/Contests.jpg) | ![BBC News](screenshots/BBCNews.jpg) |
 | SOTA Spots | Contests | BBC News |
 | ![Apple News](screenshots/AppleNews.jpg) | ![Tracker](screenshots/Tracker.jpg) | &nbsp; |
-| Apple/Tech News | Tracker | &nbsp; |
+| Apple/Tech News | Stocks Tracker | &nbsp; |
 
 ## Screens
 
@@ -38,12 +38,14 @@ The dashboard cycles through 14 screens, each auto-refreshing on its own schedul
 | **Contests** | Active and upcoming contest calendar | WA7BNM Contest Calendar | 60 min |
 | **BBC News** | Top 4 headlines with thumbnail images | BBC RSS | 10 min |
 | **Apple/Tech News** | Top 4 headlines with thumbnails | MacRumors RSS | 10 min |
-| **Tracker** | Stock/crypto price chart (S&P 500, Bitcoin, etc.) | Yahoo Finance | 2 min |
+| **Stocks Tracker** | Stock/crypto price chart (S&P 500, Bitcoin, etc.) with an animated multi-year sparkline | Yahoo Finance | 2 min |
 
 ## Hardware
 
 - **Board:** ESP32-2432S028 "Cheap Yellow Display" (ESP32 + 2.8" 320×240 ILI9341 + XPT2046 touch)
 - **Flash:** 4 MB (custom partition: 1.875 MB app + 2 MB SPIFFS, no OTA)
+- **Onboard RGB LED:** used for status indication (blue startup / green ISS-visible / red lightning)
+- **microSD slot:** optional — used only for saving screenshots (FAT32, on the CYD's VSPI bus)
 - **Power:** USB — the board draws up to ~400 mA during WiFi transmit
 
 ## Display Compatibility
@@ -139,13 +141,13 @@ After any hardware change, go to **Settings > Touch Calibrate** on the device to
 
 The status bar sits at the top of every screen:
 
-- **Left** — current screen number/total and name, e.g. `3/13 HF Conditions`
+- **Left** — current screen number/total and name, e.g. `3/14 HF Conditions`
 - **Centre** — local time (`HH:MM`); tap to jump to the Clock screen
 - **Right** — four tap targets, evenly spaced:
   - ⏯ **Play/Pause** — toggle auto-advance
-  - **▸▸ Advance** — jump to the next enabled screen immediately
+  - ☰ **Jump to screen** — open a two-column menu of every enabled screen; tap one to jump straight to it (the current screen is highlighted)
   - **WiFi bars** — signal strength (0–4 bars); tap to show an overlay with SSID, IP address, MAC address, and RSSI
-  - **☰ Menu** — open on-device Settings
+  - ⚙ **Settings cog** — open on-device Settings
 
 ## Features
 
@@ -162,7 +164,12 @@ The status bar sits at the top of every screen:
 - **Screen brightness control** — Settings > Brightness provides a draggable slider and four quick-select presets (25% / 50% / 75% / 100%). The change takes effect immediately and is saved to flash. Reducing brightness can help with flickering on USB-powered boards
 - **Unit preferences** — Settings > Distance Units (mi / km) and Temperature (C / F) are independent toggles. Distance Units also controls wind speed (mph / km/h) on the Weather screen. Changing either setting triggers an immediate weather re-fetch so the Open-Meteo API returns data in the correct unit. Distances on DX Spots, POTA Spots, SOTA Spots, and PSK Reporter convert at display time with no re-fetch needed
 - **PSK Reporter** — animated pulsing markers for your furthest and loudest reception spots, with a tap-to-inspect overlay showing callsign, country, grid, band, SNR, and distance; the map auto-zooms to fit your QTH and all current spots while preserving correct aspect ratio (letterboxed if needed)
-- **FT8 Spots** — the reverse of PSK Reporter: instead of who hears *you*, it maps the DX stations that receivers in your grid square are hearing, deduplicated by callsign keeping the strongest report. Tap the furthest (orange) or loudest (green) station for a details overlay; tap any other spot to embolden its band in the legend, which helps when the band colours are hard to tell apart. The legend auto-positions itself to whichever corner covers the fewest spots
+- **FT8 Spots** — the reverse of PSK Reporter: instead of who hears *you*, it maps the DX stations that receivers in your grid square are hearing, deduplicated by callsign keeping the strongest report. Tap the furthest (orange) or loudest (green) station for a details overlay; tap any other spot to embolden its band in the legend, which helps when the band colours are hard to tell apart. The legend auto-positions itself to whichever corner covers the fewest spots. **Tap the legend** to open a per-band ON/OFF filter — hidden bands drop out of the map (dots, lines, furthest/loudest, and auto-zoom) and dim in the legend; the selection persists across reboots
+- **Onboard RGB LED indicators** — the CYD's common-anode RGB LED signals status at a glance, each colour independently toggleable in Settings: **blue** flashes at startup while the initial data is still loading (default on); **green** flashes when the ISS is optically visible overhead — sunlit and above the horizon with a dark local sky (default on); **red** flashes on a lightning alert (default on). During a lightning alert while viewing the ISS Tracker screen, the LED alternates red/green
+- **Lightning alert** — when a thunderstorm is forecast within the next hour, a red "LIGHTNING ALERT" banner appears on the Weather screen between the current conditions and the 7-day forecast, and the onboard LED flashes red. Tap the banner to silence the LED (the banner stays as a warning); it re-arms automatically when the alert clears. The 7-day layout is byte-identical when no alert is active
+- **News headline popup** — tap any headline on the BBC or Apple/Tech News screen to open the full text in a popup (long headlines are otherwise truncated). Tap anywhere to close; it also auto-closes after 30 s, and auto-play pauses while it is open
+- **Extended fonts** — the DejaVu 9/12/18 px fonts are extended with the full Latin-1 range (£, ©, ®, °, and accented letters like é, ñ, ü, ç), the Euro sign, and General-Punctuation glyphs (en/em dash, curly quotes, bullet, ellipsis), so news, DX, and contest text renders these as real glyphs instead of blank boxes or ASCII stand-ins. Degree symbols on the Weather and ISS Tracker screens use the real U+00B0 glyph. Higher Unicode still folds to an ASCII approximation. The extended glyphs are generated by `tools/gen_dejavu_ext.py`
+- **Screenshots to SD card** — with Settings > Service > "Screenshot (3s hold)" enabled, holding the screen for 3 seconds saves a 24-bit BMP of the current frame to a microSD card (`scr0000.bmp`, `scr0001.bmp`, …); a toast confirms. The card uses the CYD's VSPI slot, freed up by bit-banging the touch controller in software. The Service menu also has "Fake Lightning" and "Fake ISS Pass" toggles for staging documentation screenshots (both reset on reboot)
 - **Mode filter** — filter DX, POTA, and SOTA spots by mode (CW, Voice, FT8, FT4, Digital, Other) from Settings > Mode Filter
 - **Contest detail** — tap any contest to fetch mode, bands, and exchange requirements from contestcalendar.com, with word-wrapping for long exchange formats and a clear error state if the lookup fails
 - **High-resolution coastlines** — world map uses Natural Earth 50m data at half-degree resolution
@@ -343,34 +350,81 @@ Tap the ☰ menu icon at the right of the status bar to open on-device settings.
 - **Brightness** — drag slider or use presets to set backlight level; takes effect immediately
 - **Callsign** — your amateur radio callsign (used for PSK Reporter)
 - **Distance Units** — mi or km; also controls wind speed units (mph / km/h) on the Weather screen
+- **ISS Frequencies** — the SSTV, APRS, and voice-repeater in/out frequencies used by the ISS Tracker Doppler panel; tap a value to edit it with a digit spinner (these change over time, so they're user-editable)
 - **ISS Pass Alert** — auto-jump to ISS Tracker when the ISS is visible from your QTH (only shown when the ISS Tracker screen is enabled)
+- **ISS Visible LED** — flash the onboard green LED while the ISS is optically visible overhead
+- **Lightning LED** — flash the onboard red LED on a lightning alert (the banner shows regardless)
 - **Location** — 6-character Maidenhead grid locator (used for distance calculations, map position, and weather). Saving a new grid automatically detects and applies the correct timezone
 - **Mode Filter** — toggle CW, Voice, FT8, FT4, Digital, and Other modes for the DX/POTA/SOTA spot screens
 - **Screens** — enable/disable individual screens
+- **Service** — engineering/documentation aids: enable a 3-second-hold screenshot to SD, and stage a fake lightning alert or fake ISS pass (fakes reset on reboot)
+- **Startup LED** — flash the onboard blue LED while data loads at boot
+- **Stocks Tracker** — choose stock/crypto symbol and chart range (1–5 years)
 - **Temperature** — C or F; independent of Distance Units
 - **Timezone** — select from 22 common timezones, or let Location auto-detect it for you
 - **Touch Calibrate** — run if touches don't line up with what's displayed
-- **Tracker** — choose stock/crypto symbol and chart range (1–5 years)
+
+## Testing
+
+The project has a Unity unit-test suite, run through PlatformIO:
+
+```bash
+# Build, flash, and run the tests on a connected board
+~/.platformio/penv/bin/pio test -e test
+
+# Compile the test binary only (no board needed) — useful as a quick check
+~/.platformio/penv/bin/pio test -e test --without-uploading --without-testing
+```
+
+**The tests run on the ESP32, not on the host.** Almost every source file includes
+hardware headers (LovyanGFX, WiFi, HTTPClient, SPIFFS, ArduinoJson) at file scope,
+so the pure logic can't be compiled on a PC without an impractical fake layer.
+Running on-device exercises the *real* firmware functions in their real
+environment instead. The `[env:test]` environment (see `platformio.ini`) compiles
+`src/` into the test binary and defines `RUN_UNIT_TESTS`, which makes `main.cpp`
+hand its `setup()`/`loop()` over to the Unity runner in `test/`. The normal
+`pio run` firmware build is unaffected.
+
+Current coverage focuses on the pure, deterministic logic that's safe to assert:
+
+| Suite (`test/test_logic`) | Function under test | Source |
+|---|---|---|
+| Maidenhead grid → lat/lon | `gridToLatLon` | `settings.cpp` |
+| Mode string → filter bit | `classifyMode` | `settings.cpp` |
+| IANA zone → timezone index (incl. aliases) | `tzFindByIana` | `settings.cpp` |
+| Callsign prefix → DXCC entity | `callCountry` | `screen_dxspots.cpp` |
+| Price thousands-separators | `fmtPrice` | `ui.cpp` |
+
+Hardware-bound behaviour (rendering, WiFi, HTTPS fetching, touch) is not
+unit-tested — it needs the device and its live data sources — so those paths are
+still verified by running the firmware.
 
 ## Project Structure
 
 ```
 include/
-  config.h              Screen IDs, API URLs, timing, colour palette
+  config.h              Screen IDs, API URLs, timing, LED/SD pins, colour palette
   data_store.h          Shared data structures for all screens
   settings.h            Persistent settings and mode filter defines
+  service.h             Service-menu hooks (SD screenshot, fake lightning/ISS)
   moon_texture.h        41×41 RGB565 moon photograph (PROGMEM, ~3.4 KB flash)
   screen_*.h            Per-screen headers
-  lgfx_config.h         LovyanGFX display/touch configuration
-  fonts/                Custom font headers (Akzidenz Grotesk)
+  lgfx_config.h         LovyanGFX display/touch configuration (touch bit-banged)
+  fonts/                DejaVu font headers (extended with Latin-1 / € / punctuation)
 src/
-  main.cpp              Setup, touch handling, screen cycling, ISS pass alert
-  ui.cpp                Sprite management, status bar, WiFi overlay, draw dispatch
+  main.cpp              Setup, touch handling, screen cycling, RGB LED, ISS pass alert
+  ui.cpp                Sprite management, status bar, overlays, draw dispatch
   fetch.cpp             Background fetch task (core 1), all API calls, ISS pass prediction
   settings.cpp          SPIFFS load/save, grid-to-lat/lon, mode classification
+  screenshot.cpp        SD-card BMP screenshot capture (SdFat on VSPI)
   screen_*.cpp          Per-screen rendering
+  fonts/dejavu_ext.cpp  Generated extended DejaVu glyph tables
 data/
   wifi.txt              WiFi credentials (SSID + password, gitignored)
+test/
+  test_logic/           On-device Unity unit tests (pio test -e test)
+tools/
+  gen_dejavu_ext.py     Regenerates fonts/dejavu_ext.cpp from DejaVuSans.ttf
 
 cyd-dashboard.code-workspace   VS Code workspace (settings + recommended extensions)
 .vscode/tasks.json      Build / Upload / Monitor tasks
@@ -379,6 +433,10 @@ sdkconfig.defaults      ESP-IDF config; source of truth for all CONFIG_* values
                         (delete the generated sdkconfig.esp32dev to re-apply)
 partitions.csv          4 MB layout: 1.94 MB app0 + 2 MB SPIFFS, no OTA
 ```
+
+Every function across the headers and sources carries a Doxygen header block
+(`@brief` / `@param` / `@return`) documenting its purpose, parameters, and
+success/failure return semantics.
 
 ## Data Sources
 
@@ -398,4 +456,4 @@ All data is fetched from free, public APIs with no API keys required:
 
 ## Licence
 
-This project is provided as-is for personal and educational use.
+Released under the [MIT License](LICENSE).
