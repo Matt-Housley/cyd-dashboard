@@ -8,16 +8,20 @@ See [History.txt](History.txt) for the full version history and changelog.
 
 | | | |
 |:---:|:---:|:---:|
-| ![Clock](screenshots/Clock.jpg) | ![Weather](screenshots/Weather.jpg) | ![HF Conditions](screenshots/HFConditions.jpg) |
-| Clock | Weather | HF Conditions |
-| ![Propagation](screenshots/Propagation.jpg) | ![ISS Tracker](screenshots/GrayLine.jpg) | ![PSK Reporter](screenshots/PSKReporter.jpg) |
-| Propagation | ISS Tracker | PSK Reporter |
+| ![Clock](screenshots/Clock.jpg) | ![Weather](screenshots/Weather.jpg) | ![Lightning Alert](screenshots/Weather-Lightning.jpg) |
+| Clock | Weather | Lightning Alert |
+| ![HF Conditions](screenshots/HFConditions.jpg) | ![HF Conditions Detail](screenshots/HFConditions-Detail.jpg) | ![Propagation](screenshots/Propagation.jpg) |
+| HF Conditions | HF Conditions Detail | Propagation |
+| ![ISS Tracker](screenshots/ISSTracker.jpg) |  ![ISS Tracker Active](screenshots/ISSTracker-Active.jpg) | ![PSK Reporter](screenshots/PSKReporter.jpg) |
+| ISS Tracker | ISS Tracker Active Pass | PSK Reporter (Furthest Spot) |
 | ![FT8 Spots](screenshots/FT8Spots.jpg) | ![DX Spots](screenshots/DXSpots.jpg) | ![POTA Spots](screenshots/POTASpots.jpg) |
 | FT8 Spots | DX Spots | POTA Spots |
-| ![SOTA Spots](screenshots/SOTASpots.jpg) | ![Contests](screenshots/Contests.jpg) | ![BBC News](screenshots/BBCNews.jpg) |
-| SOTA Spots | Contests | BBC News |
-| ![Apple News](screenshots/AppleNews.jpg) | ![Tracker](screenshots/Tracker.jpg) | &nbsp; |
-| Apple/Tech News | Stocks Tracker | &nbsp; |
+| ![SOTA Spots](screenshots/SOTASpots.jpg) | ![Contests](screenshots/Contests.jpg) | ![Contest Detail](screenshots/Contest-Detail.jpg) |
+| SOTA Spots | Contests | Contest Detail |
+| ![BBC News](screenshots/BBCNews.jpg) | ![BBC News Expanded](screenshots/BBCNews-Detail.jpg) | ![Apple News](screenshots/AppleNews.jpg) |
+| BBC News | BBC News Expanded | Apple News |
+| ![Tracker](screenshots/Tracker.jpg) | &nbsp; | &nbsp; |
+| Stocks Tracker | &nbsp; | &nbsp; |
 
 ## Screens
 
