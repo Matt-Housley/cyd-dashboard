@@ -318,6 +318,27 @@ Install `setuptools<81` into the interpreter running `pio` — see *One-time
 setup* above. If it worked before and suddenly broke, a PlatformIO core update
 probably replaced the bundled interpreter; run the install again.
 
+**`MissingPackageManifestError: Could not find one of 'package.json' manifest files in the package`**
+A downloaded toolchain package is missing its `package.json` manifest — an
+incomplete or interrupted install, not a firmware fault. It shows up on this
+project's first build because the combined `arduino, espidf` build (see
+*Toolchain notes*) pulls in ESP-IDF 4.4.5 and its full toolchain (~2 GB,
+15–20 min); a dropped connection or a Ctrl-C mid-download leaves a package
+folder half-written. A plain `framework = arduino` project doesn't need those
+packages, which is why an older build may install cleanly on the same machine.
+
+Find the broken package(s) — any folder without a manifest:
+```bash
+for d in ~/.platformio/packages/*/; do [ -f "$d/package.json" ] || echo "BROKEN: $d"; done
+```
+Delete the ones it prints, then rebuild (`pio run`) to re-download them. If that
+doesn't clear it, remove the platform and its cache and let it fully reinstall
+(needs a stable connection):
+```bash
+rm -rf ~/.platformio/platforms/espressif32* ~/.platformio/.cache
+pio run
+```
+
 **A `CONFIG_*` change in `sdkconfig.defaults` had no effect**
 Delete `sdkconfig.esp32dev` and rebuild.
 
