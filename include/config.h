@@ -4,8 +4,8 @@
 // ─── Version ─────────────────────────────────────────────────────────────────
 #define VERSION_MAJOR  1
 #define VERSION_MINOR  18
-#define VERSION_PATCH  31
-#define VERSION_STR    "1.18.031"
+#define VERSION_PATCH  32
+#define VERSION_STR    "1.18.032"
 
 // ─── Onboard RGB LED ──────────────────────────────────────────────────────────
 // CYD (ESP32-2432S028R) has a common-anode RGB LED: driving a pin LOW lights
@@ -82,8 +82,10 @@
 #define REFRESH_POTASPOTS_MS  60000UL   // 60 s
 #define REFRESH_SOTASPOTS_MS  60000UL   // 60 s
 #define REFRESH_CONTESTS_MS 3600000UL   // 60 min
-#define REFRESH_PSK_MS       120000UL   //  2 min
-#define REFRESH_FT8_MS       120000UL   //  2 min
+// PSK and FT8 both hit retrieve.pskreporter.info, which rate-limits the retrieve
+// API (~once per 5 min); polling each every 2 min got us blocked with HTTP 503.
+#define REFRESH_PSK_MS       300000UL   //  5 min (PSK Reporter rate limit)
+#define REFRESH_FT8_MS       300000UL   //  5 min (PSK Reporter rate limit)
 
 // ─── Network ──────────────────────────────────────────────────────────────────
 #define WIFI_AP_NAME  "CYD-Dashboard"

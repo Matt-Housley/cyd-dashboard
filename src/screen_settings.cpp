@@ -174,7 +174,7 @@ static void drawMenu() {
 
     // Alphabetical row order (16 rows):
     //  0 Brightness  1 Callsign  2 Distance Units  3 ISS Frequencies
-    //  4 ISS Pass Alert  5 ISS Visible LED  6 Lightning LED  7 Location
+    //  4 ISS Pass Alert  5 ISS Pass LED  6 Lightning LED  7 Location
     //  8 Mode Filter  9 Screens  10 Service  11 Startup LED
     //  12 Stocks Tracker  13 Temperature Units  14 Timezone  15 Touch Calibrate
     // Rows 2, 4, 5, 6, 11, 13 are inline toggles; the rest navigate to a sub-page.
@@ -240,12 +240,13 @@ static void drawMenu() {
             }
 
         } else if (ri == 5) {
-            // ISS Visible LED ON/OFF — flashes the onboard green LED during a
-            // visible pass. Works independently of the Grey Line screen.
+            // ISS Pass LED ON/OFF — flashes the onboard green LED while the ISS is
+            // above the horizon (a radio pass). Works independently of the Grey
+            // Line screen.
             bool on = g_settings.issLedEnabled;
             spr.setTextColor(C(COL_WHITE));
             spr.setCursor(14, ry + 8);
-            spr.print("ISS Visible LED");
+            spr.print("ISS Pass LED");
             spr.fillRoundRect(MNU_LIST_W - 76, ry + 5, 32, 18, 3, on ? C(COL_GREEN)  : C(COL_BORDER));
             spr.drawRoundRect(MNU_LIST_W - 76, ry + 5, 32, 18, 3, C(COL_GREY));
             spr.setTextColor(C(COL_WHITE));
@@ -1228,7 +1229,7 @@ bool settingsTouchUp(int32_t sx, int32_t sy,
                     settingsSave();
                 }
             } else if (ri == 5) {
-                // ISS Visible LED ON/OFF toggle (same button geometry as row 4)
+                // ISS Pass LED ON/OFF toggle (same button geometry as row 4)
                 g_settings.issLedEnabled = (sx < MNU_LIST_W - 40);
                 settingsSave();
             } else if (ri == 6) {

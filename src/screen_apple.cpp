@@ -12,6 +12,7 @@ static int s_hlY[4], s_hlH[4], s_hlN = 0;
 static LGFX_Sprite s_thumbSpr;
 static uint32_t    s_thumbVersion = 0xFFFFFFFF;
 static bool        s_thumbReady   = false;
+static bool        s_thumbAlloc   = false;        // sprite allocated once, then reused
 static int         s_thumbW       = 0;
 static int         s_thumbH       = 0;
 
@@ -56,10 +57,15 @@ void drawScreenApple() {
         xSemaphoreGive(g_dataMutex);
 
         if (hasData && ver != s_thumbVersion) {
-            s_thumbReady = false;
-            s_thumbSpr.deleteSprite();
-            s_thumbSpr.setColorDepth(16);
-            if (s_thumbSpr.createSprite(thumbW, thumbH)) {
+            // Allocate the decode sprite ONCE and reuse it (see screen_bbc.cpp) —
+            // repeated create/deleteSprite() churns ~15 KB of DMA-capable heap and
+            // fragments the pool the TLS handshake needs.
+            if (!s_thumbAlloc) {
+                s_thumbSpr.setColorDepth(16);
+                s_thumbAlloc = s_thumbSpr.createSprite(thumbW, thumbH);
+            }
+            if (s_thumbAlloc) {
+                s_thumbReady = false;
                 s_thumbSpr.fillSprite(0);
                 xSemaphoreTake(g_dataMutex, portMAX_DELAY);
                 bool isPng = (g_appleThumbLen >= 4 &&
@@ -78,9 +84,8 @@ void drawScreenApple() {
                     s_thumbW = thumbW;
                     s_thumbH = thumbH;
                     s_thumbReady = true;
-                } else {
-                    s_thumbSpr.deleteSprite();
                 }
+                // On decode failure keep the sprite allocated (no churn).
             }
         }
     }

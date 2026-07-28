@@ -42,6 +42,23 @@ static void logTs() {
 // Keep in step with CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN in sdkconfig.defaults.
 #define TLS_MIN_CONTIG 16717U
 
+// Consecutive HTTPS attempts skipped for want of a contiguous TLS_MIN_CONTIG
+// block before the device reboots to defragment the heap.  Long-uptime heap
+// fragmentation can drop the largest free block below TLS_MIN_CONTIG even with
+// plenty of free heap; once wedged it never recovers on its own (HTTP sources
+// keep working, every HTTPS source fails "SSL - Memory allocation failed").
+// The boot-time SSL reserve guarantees a contiguous block again, so a reboot
+// restores all sources.  The streak resets on any attempt that finds enough
+// contiguous heap, so only sustained wedging triggers a reboot.
+#define TLS_STARVE_REBOOT 12
+
+// Consecutive cycles the ctx reserve may fail to reclaim before rebooting.
+// Losing ctx dooms all HTTPS, but a single miss is usually a transient
+// fragmentation spike that clears within a cycle (the reserve is re-attempted
+// every fetch, and the pre-flight guard skips HTTPS meanwhile so nothing makes
+// it worse).  Only sustained failure — a genuinely wedged heap — reboots.
+#define SSL_CTX_MISS_REBOOT 4
+
 // Fine-grained heap probe — prints free heap and largest 8-bit block at a
 // labelled point.  Set DIAG_HEAP_PROBES to 1 to localise where heap is lost
 // across a fetch; the probes proved that the drop across sslAllReclaim() is the
@@ -70,13 +87,13 @@ uint32_t g_appleThumbVersion = 0;
 
 // ─── SSL DRAM reserve helpers ─────────────────────────────────────────────────
 //
-// g_sslX509R (12288 B):
-//   Released just before http.GET() so the TLS cert-chain parser (~10 KB for
-//   BBC's 3-cert chain) has a clean region to use.  When freed it coalesces
-//   with the natural ~26 KB adjacent free block, giving ~38.9 KB for mbedTLS
-//   in_buf (16717 B) + out_buf (16717 B) — well above the 33434 B minimum.
-//   Reclaimed AFTER the inner scope closes (http + sc both destroyed) so the
-//   slot is completely empty when malloc(12288) runs.
+// g_sslX509R (SSL_X509_RESERVE, 18432 B):
+//   Released just before http.GET() so the mbedTLS input record buffer (16717 B)
+//   and the cert-chain parser have a clean, contiguous region. Sized on its own
+//   to exceed TLS_MIN_CONTIG with headroom, so it no longer depends on a
+//   fragmented neighbour coalescing (long uptime erodes that neighbour). Any
+//   adjacent free block still merges in for extra margin. Reclaimed AFTER the
+//   inner scope closes (http + sc both destroyed) so the slot is empty first.
 //
 // g_sslCtxR (6136 B):
 //   Released just before each WiFiClientSecure constructor.  The constructor's
@@ -88,11 +105,11 @@ uint32_t g_appleThumbVersion = 0;
 /** @brief Free the 12 KB x509 reserve so the TLS cert parser can use its slot. */
 static void sslX509Release()  { if (g_sslX509R)  { heap_caps_free(g_sslX509R);  g_sslX509R  = nullptr; } }
 /** @brief Re-take the 12 KB x509 reserve after TLS work completes. */
-static void sslX509Reclaim()  { if (!g_sslX509R)   g_sslX509R  = heap_caps_malloc(12288, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT); }
+static void sslX509Reclaim()  { if (!g_sslX509R)   g_sslX509R  = heap_caps_malloc(SSL_X509_RESERVE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT); }
 /** @brief Free the 6 KB SSL-context reserve so the TLS client ctor can use its slot. */
 static void sslCtxRelease()   { if (g_sslCtxR)   { heap_caps_free(g_sslCtxR);   g_sslCtxR   = nullptr; } }
 /** @brief Re-take the 6 KB SSL-context reserve after the TLS client is destroyed. */
-static void sslCtxReclaim()   { if (!g_sslCtxR)    g_sslCtxR   = heap_caps_malloc(6136,  MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT); }
+static void sslCtxReclaim()   { if (!g_sslCtxR)    g_sslCtxR   = heap_caps_malloc(SSL_CTX_RESERVE,  MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT); }
 
 /** @brief Release the x509 reserve just before http.GET(), logging the resulting
  *         largest-block/heap; coalesces to ~38.9 KB for the mbedTLS buffers. */
@@ -104,21 +121,33 @@ static void sslDataRelease() {
 }
 /** @brief Re-take both SSL reserves after a TLS connection is fully torn down.
  *
- * If the 6 KB context slot cannot be reclaimed it is permanently lost (all
- * future HTTPS would fail), so the device logs and reboots. */
+ * Reclaims the CRITICAL ctx reserve FIRST: losing it dooms all future HTTPS,
+ * whereas losing x509 only costs coalesce headroom (and is retried every cycle),
+ * so giving ctx first dibs on the freed memory means a fragmentation spike
+ * sacrifices the harmless reserve, not the fatal one.  A single ctx miss is
+ * ridden out — it is re-attempted next fetch and the pre-flight guard skips
+ * HTTPS meanwhile — and only sustained failure across SSL_CTX_MISS_REBOOT cycles
+ * (a genuinely wedged heap) reboots to defragment. */
 static void sslAllReclaim() {
-    sslX509Reclaim();
-    sslCtxReclaim();
+    sslCtxReclaim();     // critical reserve first
+    sslX509Reclaim();    // harmless if this one misses; retried every cycle
     bool ctxOk = (g_sslCtxR != nullptr);
-    LOG("[ssl] reclaimed  x509=%s ctx=%s  lb8bit=%u\n",
-                  g_sslX509R ? "OK" : "FAIL",
+    LOG("[ssl] reclaimed  ctx=%s x509=%s  lb8bit=%u\n",
                   ctxOk      ? "OK" : "FAIL",
+                  g_sslX509R ? "OK" : "FAIL",
                   heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-    if (!ctxOk) {
-        // SSL context slot is permanently lost — all HTTPS will fail. Reboot.
-        LOG("[ssl] ctx slot unrecoverable — rebooting in 3s\n");
-        delay(3000);
+
+    static int s_ctxMissStreak = 0;
+    if (ctxOk) {
+        s_ctxMissStreak = 0;
+    } else if (++s_ctxMissStreak >= SSL_CTX_MISS_REBOOT) {
+        LOG("[ssl] ctx slot unrecoverable x%d — rebooting to defragment\n",
+            s_ctxMissStreak);
+        delay(2000);
         ESP.restart();
+    } else {
+        LOG("[ssl] ctx reclaim missed (streak %d/%d) — retrying next cycle\n",
+            s_ctxMissStreak, SSL_CTX_MISS_REBOOT);
     }
 }
 
@@ -235,6 +264,9 @@ static bool httpStream(const char* url, StreamConsumer consume, void* ctx,
                        const char* who, int maxTries = 3,
                        const char* userAgent = nullptr) {
     const char* UA = userAgent ? userAgent : "CYD-Dashboard/1.0 ESP32";
+    // Consecutive HTTPS attempts skipped for lack of contiguous heap; a sustained
+    // streak triggers a defragmenting reboot (see the pre-flight guard below).
+    static int s_tlsStarveStreak = 0;
     for (int attempt = 1; attempt <= maxTries; attempt++) {
         if (!ensureWiFi()) { if (attempt < maxTries) delay(2000); continue; }
 
@@ -254,7 +286,28 @@ static bool httpStream(const char* url, StreamConsumer consume, void* ctx,
                 sc.setHandshakeTimeout(30);
                 sc.setTimeout(15000);
                 sc.setInsecure();
-                {
+
+                // Pre-flight contiguous-heap guard.  mbedTLS needs one contiguous
+                // TLS_MIN_CONTIG block for its inbound record buffer; on a
+                // fragmented long-uptime heap the largest block can fall below that
+                // even with lots of free heap, and attempting the handshake then
+                // only churns failed partial allocations (worsening fragmentation).
+                // Skip it, and reboot once the device is confidently wedged.
+                uint32_t lb8 = heap_caps_get_largest_free_block(
+                    MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+                if (lb8 < TLS_MIN_CONTIG) {
+                    if (++s_tlsStarveStreak >= TLS_STARVE_REBOOT) {
+                        LOG("[ssl] HTTPS heap-starved x%d (lb8bit=%u < %u) — "
+                            "rebooting to defragment\n",
+                            s_tlsStarveStreak, lb8, (unsigned)TLS_MIN_CONTIG);
+                        delay(1000);
+                        ESP.restart();
+                    }
+                    LOG("[%s] lb8bit=%u < %u — skipping TLS (fragmented, streak %d)\n",
+                        who, lb8, (unsigned)TLS_MIN_CONTIG, s_tlsStarveStreak);
+                    fatal = true;   // retrying won't defragment the heap this call
+                } else {
+                    s_tlsStarveStreak = 0;   // enough contiguous heap this attempt
                     HTTPClient http;
                     http.begin(sc, url);
                     http.setTimeout(20000);
@@ -272,19 +325,30 @@ static bool httpStream(const char* url, StreamConsumer consume, void* ctx,
                         }
                     }
                     if (code != HTTP_CODE_OK) {
-                        char sslErr[64] = "";
-                        sc.lastError(sslErr, sizeof(sslErr));
-                        LOG("[%s] HTTP %d  ssl='%s'  lb8bit=%u\n", who, code, sslErr,
-                            heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+                        if (code < 0) {
+                            // Connection-level failure (handshake/socket) — the SSL
+                            // error is meaningful. Memory/BIGNUM/PADLOCK errors get
+                            // worse with retries, so mark them fatal.
+                            char sslErr[64] = "";
+                            sc.lastError(sslErr, sizeof(sslErr));
+                            LOG("[%s] connect failed %d  ssl='%s'  lb8bit=%u\n",
+                                who, code, sslErr,
+                                heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+                            if (strstr(sslErr, "BIGNUM")     || strstr(sslErr, "Allocation") ||
+                                strstr(sslErr, "allocation") || strstr(sslErr, "PADLOCK")) fatal = true;
+                        } else {
+                            // A real HTTP status from the server (e.g. 503, 404) —
+                            // the TLS layer worked, so don't print a stale/misleading
+                            // SSL error string.
+                            LOG("[%s] HTTP %d  lb8bit=%u\n", who, code,
+                                heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+                        }
                         http.end();
-                        // These get worse with retries, not better.
-                        if (strstr(sslErr, "BIGNUM")     || strstr(sslErr, "Allocation") ||
-                            strstr(sslErr, "allocation") || strstr(sslErr, "PADLOCK")) fatal = true;
                     } else {
                         ok = consume(http, ctx);
                         drainAndEnd(http);
                     }
-                }                               // http destroyed
+                }                               // http / guard done
             }                                   // sc destroyed
             sslAllReclaim();
         } else {
@@ -520,6 +584,72 @@ static size_t httpFetchText(const char* url, char* buf, size_t cap,
     buf[0] = '\0';
     if (!httpStream(url, textConsume, &t, who, maxTries)) return 0;
     return t.len;
+}
+
+// As httpFetchText, but the destination buffer is malloc'd INSIDE the stream
+// consumer — i.e. only after the TLS handshake has already succeeded.  That
+// keeps the buffer out of the heap during the handshake, so the RSA/BIGNUM
+// certificate verify has room for its scratch.  Used for the memory-hungriest
+// source (solar), which otherwise failed the handshake ("BIGNUM - Memory
+// allocation failed") whenever it landed at a low-heap, fragmented moment.
+struct TextSinkAlloc { char* buf; size_t cap; size_t len; };
+
+/**
+ * @brief StreamConsumer that lazily allocates its buffer, then reads the body.
+ * @param http  Active HTTPClient with a live response (handshake already done).
+ * @param ctx   Pointer to a TextSinkAlloc (buf starts null; cap is the size).
+ * @return true if at least one byte was read, false otherwise.
+ */
+static bool textConsumeAlloc(HTTPClient& http, void* ctx) {
+    TextSinkAlloc& t = *(TextSinkAlloc*)ctx;
+    if (!t.buf) {                      // allocate now — the handshake is done
+        t.buf = (char*)malloc(t.cap);
+        if (!t.buf) return false;
+    }
+    t.len = 0;                         // reset (a retry may reuse the buffer)
+    WiFiClient* s = http.getStreamPtr();
+    if (!s) return false;
+    uint32_t t0 = millis();
+    while (t.len < t.cap - 1 && (millis() - t0) < 20000) {
+        int avail = s->available();
+        if (avail > 0) {
+            int n = s->readBytes(t.buf + t.len,
+                                 min((size_t)avail, t.cap - 1 - t.len));
+            if (n > 0) t.len += n;
+            vTaskDelay(pdMS_TO_TICKS(1));
+        } else if (!s->connected()) {
+            break;
+        } else {
+            delay(5);
+        }
+    }
+    t.buf[t.len] = '\0';
+    return t.len > 0;
+}
+
+/**
+ * @brief Fetch a whole (small) body into a heap buffer allocated post-handshake.
+ *
+ * The buffer is malloc'd inside the consumer (after TLS is up), so it doesn't
+ * compete with the handshake's RSA/BIGNUM scratch for contiguous heap.
+ * @param url          Target URL.
+ * @param cap          Buffer size to allocate.
+ * @param who          Short label for log lines.
+ * @param[out] outLen  Receives the bytes read (0 on failure).
+ * @param maxTries     Maximum attempts. Defaults to 3.
+ * @return The allocated NUL-terminated buffer (caller must free), or nullptr on
+ *         failure.
+ */
+static char* httpFetchTextAlloc(const char* url, size_t cap, const char* who,
+                                size_t& outLen, int maxTries = 3) {
+    TextSinkAlloc t = { nullptr, cap, 0 };
+    outLen = 0;
+    if (!httpStream(url, textConsumeAlloc, &t, who, maxTries)) {
+        if (t.buf) free(t.buf);
+        return nullptr;
+    }
+    outLen = t.len;
+    return t.buf;
 }
 
 
@@ -930,16 +1060,15 @@ void fetchWeather() {
  *         into g_solar (see fetch.h). */
 void fetchSolar() {
     g_fetchState[FSRC_SOLAR] = FS_ACTIVE;
-    // hamqsl solarxml.php is ~3 KB.  One bounded allocation, parsed in place,
-    // released before the data is published — no incremental String growth.
+    // hamqsl solarxml.php is ~3 KB.  This is the memory-hungriest fetch (big
+    // buffer + a cert that needs more RSA/BIGNUM scratch than the others), so it
+    // was failing the handshake at low-heap moments.  httpFetchTextAlloc defers
+    // the buffer's allocation until AFTER the handshake, freeing that heap for
+    // the RSA/BIGNUM cert verify.  Parsed in place, then released.
     const size_t SOLAR_CAP = 6144;
-    char* sbuf = (char*)malloc(SOLAR_CAP);
+    size_t slen = 0;
+    char* sbuf = httpFetchTextAlloc(API_SOLAR, SOLAR_CAP, "solar", slen);
     if (!sbuf) { g_fetchState[FSRC_SOLAR] = FS_FAIL; return; }
-    if (!httpFetchText(API_SOLAR, sbuf, SOLAR_CAP, "solar")) {
-        free(sbuf);
-        g_fetchState[FSRC_SOLAR] = FS_FAIL;
-        return;
-    }
     String body(sbuf);
     free(sbuf);
 

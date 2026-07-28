@@ -1,6 +1,42 @@
 CYD Dashboard — Version History
 ================================
 
+1.18.032  2026-07-28
+  [Change] The ISS green LED now tracks radio contactability, not naked-eye
+           visibility: it flashes whenever the ISS is above the horizon over the
+           QTH (a geometric pass, MIN_EL 5 deg), day or night, instead of
+           requiring the ISS to be sunlit with a dark local sky. The setting is
+           renamed "ISS Visible LED" -> "ISS Pass LED" to match; the LED now
+           agrees with the ISS Tracker "VISIBLE NOW" card and the pass auto-jump.
+  [Fix] Long-uptime heap fragmentation that starved the mbedTLS handshake (HTTP
+        sources kept working while every HTTPS source failed with "SSL - Memory
+        allocation failed", eventually forcing a reboot). Addressed on several
+        fronts:
+        - News thumbnail sprites are allocated once and reused instead of
+          create/deleteSprite() on every new hero image (~15 KB of DMA-heap
+          churn per refresh — a leading fragmentation source).
+        - Pre-flight guard: the TLS handshake is skipped (rather than churning
+          failed partial allocations) when the largest contiguous block is below
+          what mbedTLS needs; a reboot follows only after sustained starvation.
+        - The SSL reserves reclaim the critical ctx block first (losing it dooms
+          HTTPS; losing x509 is harmless and self-heals), and a single ctx miss
+          is ridden out for a few cycles rather than rebooting immediately.
+        - The x509 reserve is raised 12288 -> 18432 B so releasing it clears the
+          TLS record-buffer threshold on its own, without relying on a fragmented
+          neighbour block coalescing.
+        Uptime went from a reboot every ~15-20 min to many hours.
+  [Fix] Solar (hamqsl) — the most memory-hungry fetch — no longer fails the
+        handshake with "BIGNUM - Memory allocation failed" at low-heap moments.
+        Its ~6 KB buffer is now allocated AFTER the handshake (inside the stream
+        consumer), freeing that heap for the RSA certificate verify.
+  [Change] PSK Reporter and FT8 Spots now poll every 5 min (was 2 min). Both hit
+           retrieve.pskreporter.info, whose retrieve API rate-limits (~once per
+           5 min); the old cadence got the device blocked with HTTP 503.
+  [Change] Cleaner fetch logs: the SSL error string is printed only for genuine
+           connection-level failures (negative HTTP codes), not for real server
+           responses like 503/404 (which used to show a stale, misleading
+           CTR_DRBG/SSL string).
+
 1.18.031  2026-07-24
   [Feature] Added a PlatformIO/Unity unit-test suite (test/test_logic), run with
             "pio test -e test". Because the codebase is welded to hardware headers,

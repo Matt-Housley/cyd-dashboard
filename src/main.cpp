@@ -55,14 +55,14 @@ volatile FetchState g_fetchState[FSRC_COUNT] = {};   // all IDLE at boot
 // They are HELD until the last possible moment before each TLS connection, then
 // freed and reclaimed by fetch.cpp so nothing can nibble those slots.
 //
-//   g_sslX509R   12288 B  — freed just before http.GET(); TLS cert-chain parser
-//                           (~10 KB for BBC's 3-cert chain) lands here.
-//                           When freed it coalesces with the natural ~26 KB
-//                           adjacent free block → ~38.9 KB for mbedTLS
-//                           in_buf (16717 B) + out_buf (16717 B) ✓
+//   g_sslX509R  18432 B  — (SSL_X509_RESERVE) freed just before http.GET() for
+//                           the mbedTLS input record buffer (16717 B) + cert-
+//                           chain parse. Sized to exceed TLS_MIN_CONTIG on its
+//                           own so it doesn't depend on a fragmented neighbour
+//                           coalescing; any adjacent free block adds margin.
 //
-//   g_sslCtxR     6136 B  — freed just before WiFiClientSecure constructor;
-//                           new sslclient_context() (6136 B) first-fits here.
+//   g_sslCtxR     6136 B  — (SSL_CTX_RESERVE) freed just before WiFiClientSecure
+//                           constructor; new sslclient_context() first-fits here.
 void* g_sslX509R   = nullptr;
 void* g_sslCtxR    = nullptr;
 
@@ -428,7 +428,7 @@ static void handleTouch() {
     }
 }
 
-// ─── Onboard green LED — blinks while the ISS is optically visible ────────────
+// ─── Onboard green LED — blinks while the ISS is above the horizon (radio pass) ─
 /** @brief Configure the three onboard LED GPIOs as outputs and switch them off. */
 static void ledInit() {
     pinMode(PIN_LED_R, OUTPUT);
@@ -465,7 +465,8 @@ static bool startupComplete() {
  *   - Red/green   — a lightning alert while the ISS Tracker screen is active
  *                   (the two colours alternate).
  *   - Red blink   — a thunderstorm is due within the hour (until acknowledged).
- *   - Green blink — a visible ISS pass is overhead (sunlit ISS, dark local sky).
+ *   - Green blink — the ISS is above the horizon over the QTH (an overhead pass,
+ *                    contactable by radio — not gated on optical visibility).
  * Call once per loop; internal timing produces one on/off cycle per second.
  */
 static void ledUpdate() {
@@ -485,22 +486,20 @@ static void ledUpdate() {
     }
     digitalWrite(PIN_LED_B, LED_OFF);
 
-    // Green condition: ISS optically visible
+    // Green condition: the ISS is above the horizon over the QTH — i.e. within an
+    // active pass window (computed at MIN_EL = 5°), so it's contactable by radio.
+    // This is a geometric pass; it does NOT require optical visibility, so a
+    // daylight pass (still a radio pass) flashes the LED.
     bool green = false;
     if (g_settings.issLedEnabled) {
         xSemaphoreTake(g_dataMutex, portMAX_DELAY);
         bool    pv   = g_iss.passValid;
         int32_t rise = g_iss.passRiseSec;
         int32_t set  = g_iss.passSetSec;
-        float   ilat = g_iss.lat;
-        float   ilon = g_iss.lon;
         xSemaphoreGive(g_dataMutex);
         if (pv) {
-            time_t  now   = time(nullptr);
-            int32_t now32 = (int32_t)now;
-            if (now32 >= rise && now32 < set)
-                green = issOpticallyVisible(ilat, ilon,
-                                            g_settings.lat, g_settings.lon, now);
+            int32_t now32 = (int32_t)time(nullptr);
+            green = (now32 >= rise && now32 < set);
         }
     }
 
@@ -625,15 +624,17 @@ void setup() {
                   ESP.getFreeHeap());
 
     // ── SSL pre-reserves: allocated RIGHT AFTER sprite ────────────────────────
-    // g_sslX509R (12288 B) holds the region that will be used by the TLS cert-
-    // chain parser.  When freed just before http.GET() it coalesces with the
-    // natural ~26 KB adjacent free block, yielding ~38.9 KB for mbedTLS's
-    // in_buf (16717 B) + out_buf (16717 B) — well above the 33434 B minimum.
+    // g_sslX509R (SSL_X509_RESERVE) holds a contiguous region for the TLS input
+    // record buffer. Sized >= TLS_MIN_CONTIG (16717) so that when freed just
+    // before http.GET() it yields a block big enough on its own — with headroom —
+    // rather than relying on a fragmented neighbour to coalesce (long uptime
+    // erodes that neighbour, which parks the largest block on the threshold and
+    // causes the transient TLS skips).
     //
-    // g_sslCtxR (6136 B) is freed just before each WiFiClientSecure constructor
-    // so new sslclient_context() first-fits into the vacated slot.
-    g_sslX509R  = heap_caps_malloc(12288, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    g_sslCtxR   = heap_caps_malloc(6136,  MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    // g_sslCtxR (SSL_CTX_RESERVE) is freed just before each WiFiClientSecure
+    // constructor so new sslclient_context() first-fits into the vacated slot.
+    g_sslX509R  = heap_caps_malloc(SSL_X509_RESERVE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    g_sslCtxR   = heap_caps_malloc(SSL_CTX_RESERVE,  MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     Serial.printf("[boot] SSL reserves: x509=%p ctx=%p  heap=%u  lb8bit=%u\n",
                   g_sslX509R, g_sslCtxR,
                   ESP.getFreeHeap(),

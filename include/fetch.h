@@ -68,5 +68,13 @@ extern uint32_t g_appleThumbVersion;
 // Two blocks are allocated in setup() right after the sprite and HELD between
 // SSL calls so nothing nibbles their slots. Freed only for the brief window of
 // each TLS handshake / cert parse, then immediately reclaimed.
-extern void* g_sslX509R;  ///< 12288 B — freed just before http.GET() (TLS cert chain).
-extern void* g_sslCtxR;   ///<  6136 B — freed just before the WiFiClientSecure ctor.
+//
+// SSL_X509_RESERVE is sized >= TLS_MIN_CONTIG (16717) so that releasing it just
+// before a handshake yields a contiguous block big enough for the mbedTLS input
+// record buffer ON ITS OWN — without depending on a fragmented neighbour block
+// coalescing. That headroom is what stops long-uptime fragmentation from parking
+// the largest free block right on the threshold (the transient-skip symptom).
+#define SSL_X509_RESERVE 18432   // was 12288; raised for handshake headroom
+#define SSL_CTX_RESERVE   6136
+extern void* g_sslX509R;  ///< SSL_X509_RESERVE B — freed just before http.GET() (TLS cert chain).
+extern void* g_sslCtxR;   ///< SSL_CTX_RESERVE B — freed just before the WiFiClientSecure ctor.
