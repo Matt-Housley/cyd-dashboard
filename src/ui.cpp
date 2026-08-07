@@ -169,7 +169,7 @@ static const char* SCREEN_LABELS[NUM_SCREENS] = {
     "Propagation",
     "ISS Tracker",
     "PSK Reporter",
-    "FT8 Spots",
+    "FT8 Spots",   // dynamic — see screenLabel() (FT8/FT4 per settings)
     "DX Spots",
     "POTA Spots",
     "SOTA Spots",
@@ -178,6 +178,13 @@ static const char* SCREEN_LABELS[NUM_SCREENS] = {
     "Apple News",
     "Tracker",
 };
+
+/** @brief The display label for a screen. Usually SCREEN_LABELS[id], but the
+ *         FTx Spots screen's label tracks the FT8/FT4 mode setting. */
+static const char* screenLabel(int id) {
+    if (id == SCR_FT8SPOTS) return ft8ScreenTitle();
+    return SCREEN_LABELS[id];
+}
 
 // Status bar button X positions — shared with touch handler via getStatusBarLayout()
 // All right-side slots use the same width for even spacing.
@@ -444,7 +451,7 @@ static void drawScreenMenu(int screenID) {
         spr.fillCircle(x + 8, cy, 2, C(cur ? COL_ORANGE : COL_GREY));
         spr.setTextColor(C(cur ? COL_ORANGE : COL_WHITE));
         spr.setCursor(x + 16, cy - 5);
-        spr.print(SCREEN_LABELS[id]);
+        spr.print(screenLabel(id));
     }
 }
 
@@ -545,7 +552,7 @@ static void drawStatusBar(int screenID, bool autoPlay, bool paused) {
 
     spr.setTextColor(C(COL_ORANGE));
     spr.setCursor(4 + cntW + 5, 3);
-    spr.print(SCREEN_LABELS[screenID]);
+    spr.print(screenLabel(screenID));
 
     // ── Local time (centre) ───────────────────────────────────────────────────
     struct tm ti;

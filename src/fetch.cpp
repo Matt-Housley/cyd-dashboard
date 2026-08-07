@@ -3042,10 +3042,11 @@ void fetchFT8Spots() {
     char grid4[5] = {};
     strlcpy(grid4, g_settings.grid, 5);
 
+    const char* mode = g_settings.ft8ModeFt4 ? "FT4" : "FT8";
     char url[160];
-    snprintf(url, sizeof(url), API_FT8SPOTS, grid4);
+    snprintf(url, sizeof(url), API_FT8SPOTS, grid4, mode);
     g_fetchState[FSRC_FT8] = FS_ACTIVE;
-    LOG("[ft8] fetching for grid %s\n", grid4);
+    LOG("[ft8] fetching %s for grid %s\n", mode, grid4);
 
     FT8SpotsData nd = {};
     if (!httpStream(url, ft8Consume, &nd, "ft8")) {
@@ -3223,12 +3224,14 @@ void fetchTask(void* param) {
             lastPSK = millis();
             vTaskDelay(pdMS_TO_TICKS(500)); // let SSL cleanup before next HTTPS
         }
-        if (now - lastFT8 >= (ft8Ok ? REFRESH_FT8_MS : 60000UL)) {
+        if (g_forceFetchFT8 ||
+            now - lastFT8 >= (ft8Ok ? REFRESH_FT8_MS : 60000UL)) {
             fetchFT8Spots();
             xSemaphoreTake(g_dataMutex, portMAX_DELAY);
             ft8Ok = g_ft8Spots.valid;
             xSemaphoreGive(g_dataMutex);
             lastFT8 = millis();
+            g_forceFetchFT8 = false;
         }
         if (g_contestDetailReq >= 0) {
             fetchContestDetail();

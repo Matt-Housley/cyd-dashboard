@@ -6,6 +6,7 @@
 AppSettings      g_settings;
 volatile bool    g_forceFetchWeather = false;
 volatile bool    g_forceFetchTracker = false;
+volatile bool    g_forceFetchFT8     = false;
 
 // ─── Timezone table ───────────────────────────────────────────────────────────
 const TzEntry TZ_LIST[TZ_COUNT] = {
@@ -166,6 +167,7 @@ static void applyDefaults(AppSettings& s) {
     s.useCelsius     = true;
     s.useKm          = false;
     s.ft8BandFilter  = FT8_BAND_ALL;
+    s.ft8ModeFt4     = false;   // default to FT8
     s.issFreqSstv    = 437.550f;
     s.issFreqAprs    = 145.825f;
     s.issFreqRptIn   = 145.990f;
@@ -217,6 +219,7 @@ void settingsLoad() {
     g_settings.useCelsius     =      doc["celsius"]  | true;
     g_settings.useKm          =      doc["useKm"]    | false;
     g_settings.ft8BandFilter  = (uint16_t)(doc["ft8bands"] | FT8_BAND_ALL);
+    g_settings.ft8ModeFt4     = doc["ft8ft4"] | false;
     g_settings.issFreqSstv    = doc["fSstv"]   | 437.550;
     g_settings.issFreqAprs    = doc["fAprs"]   | 145.825;
     g_settings.issFreqRptIn   = doc["fRptIn"]  | 145.990;
@@ -267,6 +270,7 @@ void settingsSave() {
     doc["celsius"] = g_settings.useCelsius;
     doc["useKm"]   = g_settings.useKm;
     doc["ft8bands"] = g_settings.ft8BandFilter;
+    doc["ft8ft4"]   = g_settings.ft8ModeFt4;
     doc["fSstv"]   = g_settings.issFreqSstv;
     doc["fAprs"]   = g_settings.issFreqAprs;
     doc["fRptIn"]  = g_settings.issFreqRptIn;

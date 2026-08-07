@@ -62,7 +62,8 @@ struct AppSettings {
     uint8_t  brightness;                  // backlight level 0-255
     bool     useCelsius;                  // true = °C, false = °F
     bool     useKm;                       // true = km / km/h, false = miles / mph
-    uint16_t ft8BandFilter;               // FT8 Spots: 1 bit per band (see screen_ft8spots)
+    uint16_t ft8BandFilter;               // FTx Spots: 1 bit per band (see screen_ft8spots)
+    bool     ft8ModeFt4;                   // FTx Spots: false = FT8, true = FT4
     float    issFreqSstv;                 // ISS SSTV downlink (MHz)
     float    issFreqAprs;                 // ISS APRS downlink (MHz)
     float    issFreqRptIn;                // ISS voice repeater input / uplink (MHz)
@@ -88,6 +89,9 @@ extern AppSettings g_settings;
 extern volatile bool g_forceFetchWeather;
 /// As g_forceFetchWeather, for the stock tracker.
 extern volatile bool g_forceFetchTracker;
+/// As g_forceFetchWeather, for FTx Spots — set when the FT8/FT4 mode changes so
+/// the new mode's data is fetched promptly rather than on the 5-minute cycle.
+extern volatile bool g_forceFetchFT8;
 
 /**
  * @brief Load g_settings from SPIFFS, applying built-in defaults first.

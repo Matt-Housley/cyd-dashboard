@@ -4,8 +4,8 @@
 // ─── Version ─────────────────────────────────────────────────────────────────
 #define VERSION_MAJOR  1
 #define VERSION_MINOR  18
-#define VERSION_PATCH  32
-#define VERSION_STR    "1.18.032"
+#define VERSION_PATCH  33
+#define VERSION_STR    "1.18.033"
 
 // ─── Onboard RGB LED ──────────────────────────────────────────────────────────
 // CYD (ESP32-2432S028R) has a common-anode RGB LED: driving a pin LOW lights
@@ -113,8 +113,9 @@
 // NOTE: http:// does NOT work — the server redirects to https:// and the plain
 //       HTTP path in httpGet() cannot follow an HTTP→HTTPS redirect.
 #define API_PSKREPORTER "https://retrieve.pskreporter.info/query?senderCallsign=%s&lastSeconds=900&rronly=1"
-// %s = 4-char Maidenhead grid (e.g. IO92). Returns what local stations are hearing.
-#define API_FT8SPOTS    "https://retrieve.pskreporter.info/query?receiverGrid=%s&lastSeconds=900&rronly=1"
+// 1st %s = 4-char Maidenhead grid (e.g. IO92); 2nd %s = mode filter ("FT8"/"FT4").
+// Returns what local stations are hearing in the selected FTx mode.
+#define API_FT8SPOTS    "https://retrieve.pskreporter.info/query?receiverGrid=%s&lastSeconds=900&rronly=1&mode=%s"
 // ─── Screen IDs ───────────────────────────────────────────────────────────────
 #define NUM_SCREENS  14
 

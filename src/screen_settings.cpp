@@ -4,6 +4,7 @@
 #include "ui.h"
 #include "config.h"
 #include "data_store.h"
+#include "screen_ft8spots.h"
 #include "service.h"
 #include <cstring>
 #include "fonts/ui_fonts.h"
@@ -543,7 +544,7 @@ static void drawScreens() {
         int numW = spr.textWidth(numBuf);
         spr.setTextColor(C(COL_GREY_L));
         spr.setCursor(6 + numW + 4, ry + 7);
-        spr.print(names[si]);
+        spr.print(si == SCR_FT8SPOTS ? ft8ScreenTitle() : names[si]);
 
         bool en = g_settings.screenEnabled[si];
         drawBtn(SCR_BTN_X, ry + 3, 52, 18,

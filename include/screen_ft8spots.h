@@ -27,3 +27,12 @@ void ft8ClearSelection();
  *         pause), false otherwise.
  */
 bool ft8TouchUp(int32_t x, int32_t y);
+
+/**
+ * @brief The current FTx Spots screen title, reflecting the mode setting.
+ * @return "FT8 Spots" or "FT4 Spots" depending on g_settings.ft8ModeFt4.
+ *
+ * Used by the status bar and screen-picker so the label tracks the selected
+ * mode. The generic term "FTx" is used only where the mode is ambiguous.
+ */
+const char* ft8ScreenTitle();

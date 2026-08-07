@@ -1,6 +1,17 @@
 CYD Dashboard — Version History
 ================================
 
+1.18.033  2026-08-07
+  [Feature] The FT8 Spots screen can now show FT4 spots instead. Open the
+            options overlay (tap the band legend) and use the new Mode selector
+            to switch between FT8 and FT4; the choice is saved. The screen name
+            in the status bar and screen-picker follows the mode ("FT8 Spots" /
+            "FT4 Spots"), and the PSK Reporter query is filtered to the selected
+            mode. Switching mode clears the old spots and fetches the new mode
+            immediately rather than waiting for the 5-minute refresh cycle.
+            The generic term "FTx" is used where the mode is ambiguous (the
+            options overlay title).
+
 1.18.032  2026-07-28
   [Change] The ISS green LED now tracks radio contactability, not naked-eye
            visibility: it flashes whenever the ISS is above the horizon over the

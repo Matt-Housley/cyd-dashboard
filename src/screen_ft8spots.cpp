@@ -7,6 +7,16 @@
 #include "settings.h"
 #include "fonts/ui_fonts.h"
 
+// ─── Mode (FT8 / FT4) ────────────────────────────────────────────────────────
+/** @brief The currently selected FTx mode name.
+ *  @return "FT8" or "FT4" per g_settings.ft8ModeFt4. */
+static const char* ft8ModeName() { return g_settings.ft8ModeFt4 ? "FT4" : "FT8"; }
+
+/** @brief Screen title reflecting the FTx mode setting. See screen_ft8spots.h. */
+const char* ft8ScreenTitle() {
+    return g_settings.ft8ModeFt4 ? "FT4 Spots" : "FT8 Spots";
+}
+
 // Band colour / label — shared logic with PSK Reporter (duplicated to avoid
 // cross-screen coupling; the compiler will inline and eliminate dead code).
 /**
@@ -129,11 +139,16 @@ static const char* s_selBand = nullptr;
 // Legend hit-box from the last draw, so a tap on it can open the band filter.
 static int  s_legX = -1, s_legY = -1, s_legW = 0, s_legH = 0;
 
-// Band-filter overlay ("options screen"): when open, lists every band with an
-// on/off state. Cell rects are recorded each draw for hit-testing.
+// Options overlay ("options screen"): when open, offers an FT8/FT4 mode toggle
+// and lists every band with an on/off state. Cell rects are recorded each draw
+// for hit-testing.
 static bool s_filterOpen = false;
 static int  s_fbX[FT8_BAND_COUNT], s_fbY[FT8_BAND_COUNT];
 static int  s_fbW[FT8_BAND_COUNT], s_fbH[FT8_BAND_COUNT];
+
+// Mode-selector button rects (FT8 = left, FT4 = right), recorded each draw.
+static int  s_mode8X = -1, s_mode8Y = -1, s_mode8W = 0, s_mode8H = 0;
+static int  s_mode4X = -1, s_mode4Y = -1, s_mode4W = 0, s_mode4H = 0;
 
 // ─── Haversine ─────────────────────────────────────────────────────────────────
 /**
@@ -153,12 +168,13 @@ static float _fGcKm(float la1, float lo1, float la2, float lo2) {
     return R * 2.0f * atan2f(sqrtf(a), sqrtf(1.0f - a));
 }
 
-// ─── Band-filter overlay ("options screen") ──────────────────────────────────
+// ─── Options overlay ("options screen") ──────────────────────────────────────
 /**
- * @brief Draw the FT8 band-filter overlay (full-content ON/OFF band grid).
+ * @brief Draw the FTx options overlay: an FT8/FT4 mode toggle above a
+ *        full-content ON/OFF band grid.
  *
- * Lays out every band as a 2-column grid and records each cell's rect into
- * s_fbX/Y/W/H for hit-testing by ft8FilterHitTest().
+ * Records the mode-button rects into s_mode8x/s_mode4x and each band cell's
+ * rect into s_fbX/Y/W/H for hit-testing by ft8ModeHitTest / ft8FilterHitTest.
  */
 static void drawFT8BandFilter() {
     const int Y0 = _F_Y0;
@@ -168,17 +184,48 @@ static void drawFT8BandFilter() {
     spr.setFont(UI_FONT_12);
     spr.setTextColor(C(COL_ORANGE));
     spr.setCursor(6, Y0 + 3);
-    spr.print("FT8 Band Filter");
+    spr.print("FTx Options");
     spr.setFont(UI_FONT_9);
     spr.setTextColor(spr.color888(150, 150, 150));
     const char* hint = "tap to toggle";
     spr.setCursor(SCREEN_W - spr.textWidth(hint) - 6, Y0 + 5);
     spr.print(hint);
 
+    const int MX = 5;
+
+    // ── Mode selector row: "Mode  [FT8][FT4]" ─────────────────────────────────
+    {
+        const int mrY = Y0 + 20;
+        const int mrH = 18;
+        spr.setFont(UI_FONT_12);
+        spr.setTextColor(C(COL_WHITE));
+        spr.setCursor(MX + 2, mrY + 3);
+        spr.print("Mode");
+
+        const int BW = 44;               // each mode button width
+        const int BX8 = SCREEN_W - MX - 2 * BW - 4;
+        const int BX4 = SCREEN_W - MX - BW;
+        bool ft4 = g_settings.ft8ModeFt4;
+
+        s_mode8X = BX8; s_mode8Y = mrY; s_mode8W = BW; s_mode8H = mrH;
+        s_mode4X = BX4; s_mode4Y = mrY; s_mode4W = BW; s_mode4H = mrH;
+
+        spr.setFont(UI_FONT_9);
+        spr.fillRoundRect(BX8, mrY, BW, mrH, 3, ft4 ? C(COL_BORDER) : C(COL_GREEN));
+        spr.drawRoundRect(BX8, mrY, BW, mrH, 3, C(COL_GREY));
+        spr.setTextColor(C(COL_WHITE));
+        spr.setCursor(BX8 + (BW - spr.textWidth("FT8")) / 2, mrY + 5);
+        spr.print("FT8");
+
+        spr.fillRoundRect(BX4, mrY, BW, mrH, 3, ft4 ? C(COL_GREEN) : C(COL_BORDER));
+        spr.drawRoundRect(BX4, mrY, BW, mrH, 3, C(COL_GREY));
+        spr.setCursor(BX4 + (BW - spr.textWidth("FT4")) / 2, mrY + 5);
+        spr.print("FT4");
+    }
+
     const int COLS  = 2;
     const int rows  = (FT8_BAND_COUNT + COLS - 1) / COLS;   // 7
-    const int MX    = 5;
-    const int GY0   = Y0 + 21;
+    const int GY0   = Y0 + 43;
     const int GAP   = 4;
     const int gridH = SCREEN_H - GY0 - MX;
     const int colW  = (SCREEN_W - 2 * MX - GAP) / COLS;
@@ -223,6 +270,22 @@ static int ft8FilterHitTest(int x, int y) {
             y >= s_fbY[i] && y < s_fbY[i] + s_fbH[i])
             return i;
     return -1;
+}
+
+/**
+ * @brief Hit-test a tap against the FT8/FT4 mode-selector buttons.
+ * @param x,y  Touch position in screen pixels.
+ * @return true = FT4 button, false = FT8 button, and sets *hit accordingly;
+ *         returns false with *hit=false on a miss (check *hit first).
+ * @param[out] hit  Set true if either mode button was tapped.
+ */
+static bool ft8ModeHitTest(int x, int y, bool& hit) {
+    hit = false;
+    if (x >= s_mode8X && x < s_mode8X + s_mode8W &&
+        y >= s_mode8Y && y < s_mode8Y + s_mode8H) { hit = true; return false; }
+    if (x >= s_mode4X && x < s_mode4X + s_mode4W &&
+        y >= s_mode4Y && y < s_mode4Y + s_mode4H) { hit = true; return true; }
+    return false;
 }
 
 // ─── Main draw ─────────────────────────────────────────────────────────────────
@@ -292,17 +355,17 @@ void drawScreenFT8Spots() {
     // ── Not-ready / error message ─────────────────────────────────────────────
     if (!ds.valid) {
         spr.setFont(UI_FONT_9);
-        const char* base;
+        char base[40];
         bool animate = false;
         if (!g_settings.grid[0])
-            base = "Set grid locator in Settings";
+            strlcpy(base, "Set grid locator in Settings", sizeof(base));
         else if (ds.fetchFailed)
-            base = "FT8 Spots unavailable";
+            snprintf(base, sizeof(base), "%s Spots unavailable", ft8ModeName());
         else {
-            base = "Fetching FT8 Spots";
+            snprintf(base, sizeof(base), "Fetching %s Spots", ft8ModeName());
             animate = true;
         }
-        char buf[40];
+        char buf[48];
         if (animate) {
             int dots = (millis() / 400) % 4;
             snprintf(buf, sizeof(buf), "%s%.*s", base, dots, "...");
@@ -310,7 +373,9 @@ void drawScreenFT8Spots() {
             strlcpy(buf, base, sizeof(buf));
         }
         spr.setTextColor(spr.color888(180, 180, 180));
-        int fw = spr.textWidth(animate ? "Fetching FT8 Spots..." : buf);
+        char fullMsg[48];
+        snprintf(fullMsg, sizeof(fullMsg), "Fetching %s Spots...", ft8ModeName());
+        int fw = spr.textWidth(animate ? fullMsg : buf);
         spr.setCursor((SCREEN_W - fw) / 2, _F_Y0 + _F_H / 2 - 4);
         spr.print(buf);
         return;
@@ -622,8 +687,26 @@ void ft8ClearSelection() { s_sel = -1; s_selBand = nullptr; s_filterOpen = false
 bool ft8TouchUp(int32_t x, int32_t y) {
     const int HIT = 25;
 
-    // Band-filter overlay open: a tap on a band toggles it; a miss closes it.
+    // Options overlay open: a tap on a mode button switches FT8/FT4; a tap on a
+    // band toggles it; a miss closes the overlay.
     if (s_filterOpen) {
+        bool modeHit = false;
+        bool wantFt4 = ft8ModeHitTest(x, y, modeHit);
+        if (modeHit) {
+            if (wantFt4 != g_settings.ft8ModeFt4) {
+                g_settings.ft8ModeFt4 = wantFt4;
+                settingsSave();
+                // The cached spots are for the previous mode — drop them so the
+                // screen shows "Fetching …" until the new mode's fetch lands,
+                // and request that fetch now rather than on the 5-min cycle.
+                xSemaphoreTake(g_dataMutex, portMAX_DELAY);
+                g_ft8Spots = FT8SpotsData{};
+                xSemaphoreGive(g_dataMutex);
+                g_forceFetchFT8 = true;
+                s_sel = -1; s_selBand = nullptr;
+            }
+            return true;
+        }
         int bi = ft8FilterHitTest(x, y);
         if (bi >= 0) {
             g_settings.ft8BandFilter ^= (uint16_t)(1u << bi);
